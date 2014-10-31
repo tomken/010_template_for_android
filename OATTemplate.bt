@@ -1,0 +1,1077 @@
+LittleEndian();
+
+#define NO_INDEX (0xFFFFFFFF)
+
+typedef uint32 Elf32_Addr; // Program address
+typedef uint32 Elf32_Off;  // File offset
+typedef uint16 Elf32_Half;
+typedef uint32 Elf32_Word;
+typedef int	Elf32_Sword;
+
+// Object file magic string.
+// static const char ElfMagic[] = { 0x7f, 'E', 'L', 'F', '\0' };
+
+// e_ident size and indices.
+typedef enum <uint32> {
+  EI_MAG0	   = 0,		  // File identification index.
+  EI_MAG1	   = 1,		  // File identification index.
+  EI_MAG2	   = 2,		  // File identification index.
+  EI_MAG3	   = 3,		  // File identification index.
+  EI_CLASS	  = 4,		  // File class.
+  EI_DATA	   = 5,		  // Data encoding.
+  EI_VERSION	= 6,		  // File version.
+  EI_OSABI	  = 7,		  // OS/ABI identification.
+  EI_ABIVERSION = 8,		  // ABI version.
+  EI_PAD		= 9,		  // Start of padding bytes.
+  EI_NIDENT	 = 16		  // Number of bytes in e_ident.
+} EI_Type;
+
+typedef struct {
+  unsigned char e_ident[EI_NIDENT]; // ELF Identification bytes
+  Elf32_Half	e_type;	  // Type of file (see ET_* below)
+  Elf32_Half	e_machine;   // Required architecture for this file (see EM_*)
+  Elf32_Word	e_version;   // Must be equal to 1
+  Elf32_Addr	e_entry;	 // Address to jump to in order to start program
+  Elf32_Off	 e_phoff;	 // Program header table's file offset, in bytes
+  Elf32_Off	 e_shoff;	 // Section header table's file offset, in bytes
+  Elf32_Word	e_flags;	 // Processor-specific flags
+  Elf32_Half	e_ehsize;	// Size of ELF header, in bytes
+  Elf32_Half	e_phentsize; // Size of an entry in the program header table
+  Elf32_Half	e_phnum;	 // Number of entries in the program header table
+  Elf32_Half	e_shentsize; // Size of an entry in the section header table
+  Elf32_Half	e_shnum;	 // Number of entries in the section header table
+  Elf32_Half	e_shstrndx;  // Sect hdr table index of sect name string table
+} Elf32_Ehdr;
+
+// Segment types.
+enum {
+  PT_NULL	= 0, // Unused segment.
+  PT_LOAD	= 1, // Loadable segment.
+  PT_DYNAMIC = 2, // Dynamic linking information.
+  PT_INTERP  = 3, // Interpreter pathname.
+  PT_NOTE	= 4, // Auxiliary information.
+  PT_SHLIB   = 5, // Reserved.
+  PT_PHDR	= 6, // The program header table itself.
+  PT_TLS	 = 7, // The thread-local storage template.
+  PT_LOOS	= 0x60000000, // Lowest operating system-specific pt entry type.
+  PT_HIOS	= 0x6fffffff, // Highest operating system-specific pt entry type.
+  PT_LOPROC  = 0x70000000, // Lowest processor-specific program hdr entry type.
+  PT_HIPROC  = 0x7fffffff, // Highest processor-specific program hdr entry type.
+
+  // x86-64 program header types.
+  // These all contain stack unwind tables.
+  PT_GNU_EH_FRAME  = 0x6474e550,
+  PT_SUNW_EH_FRAME = 0x6474e550,
+  PT_SUNW_UNWIND   = 0x6464e550,
+
+  PT_GNU_STACK  = 0x6474e551, // Indicates stack executability.
+  PT_GNU_RELRO  = 0x6474e552, // Read-only after relocation.
+
+  // ARM program header types.
+  PT_ARM_ARCHEXT = 0x70000000, // Platform architecture compatibility info
+  // These all contain stack unwind tables.
+  PT_ARM_EXIDX   = 0x70000001,
+  PT_ARM_UNWIND  = 0x70000001
+};
+
+string ReadPhdrType(Elf32_Word flag) {
+	switch (flag) {
+		case PT_NULL:	return "null";
+		case PT_LOAD:	return "load";
+		case PT_DYNAMIC: return "dynamic";
+		case PT_INTERP:  return "interp";
+		case PT_NOTE:	return "note";
+		case PT_SHLIB:   return "shlib";
+		case PT_PHDR:	return "phdr";
+		case PT_TLS:	 return "tls";
+		case PT_LOOS:	return "loos";
+		case PT_HIOS:	return "hios";
+		case PT_LOPROC:  return "loproc";
+		case PT_HIPROC:  return "hiproc";
+	}
+	return "ERROR";
+}
+
+// Program header for ELF32.
+typedef struct {
+  Elf32_Word p_type <read=ReadPhdrType>; // Type of segment
+  Elf32_Off  p_offset; // File offset where segment is located, in bytes
+  Elf32_Addr p_vaddr;  // Virtual address of beginning of segment
+  Elf32_Addr p_paddr;  // Physical address of beginning of segment (OS-specific)
+  Elf32_Word p_filesz; // Num. of bytes in file image of segment (may be zero)
+  Elf32_Word p_memsz;  // Num. of bytes in mem image of segment (may be zero)
+  Elf32_Word p_flags;  // Segment flags
+  Elf32_Word p_align;  // Segment alignment constraint
+} Elf32_Phdr;
+
+local uint section_name_off = 0;
+local uint dynsym_name_off = 0;
+local uint oatdata_off = 0;
+local uint oatexec_off = 0;
+
+typedef struct {
+	Elf32_Word off;
+
+	local quad curroff = FTell();
+	FSeek( section_name_off + off );
+	string s_name_str;
+	FSeek( curroff );
+} Elf32_Shdr_Name;
+
+// Section header.
+typedef struct {
+  Elf32_Word sh_name <read=ReadShdrName>;	  // Section name (index into string table)
+  Elf32_Word sh_type;	  // Section type (SHT_*)
+  Elf32_Word sh_flags;	 // Section flags (SHF_*)
+  Elf32_Addr sh_addr;	  // Address where section is to be loaded
+  Elf32_Off  sh_offset;	// File offset of section data, in bytes
+  Elf32_Word sh_size;	  // Size of section, in bytes
+  Elf32_Word sh_link;	  // Section type-specific header table index link
+  Elf32_Word sh_info;	  // Section type-specific extra information
+  Elf32_Word sh_addralign; // Section address alignment
+  Elf32_Word sh_entsize;   // Size of records contained within the section
+} Elf32_Shdr;
+
+string ReadShdrName(Elf32_Word off) {
+	return ReadString(section_name_off + off);
+}
+
+string ReadDynsymName(Elf32_Word off) {
+	return ReadString(dynsym_name_off + off);
+}
+
+typedef struct {
+	Elf32_Word	st_name;  // Symbol name (index into string table)
+	Elf32_Addr	st_value; // Value or address associated with the symbol
+	Elf32_Word	st_size;  // Size of the symbol
+	unsigned char st_info;  // Symbol's type and binding attributes
+	unsigned char st_other; // Must be zero; reserved
+	Elf32_Half	st_shndx; // Which section (header table index) it's defined in
+} Elf32_Sym_Fixed;
+
+typedef struct {
+	Elf32_Word	st_name <read=ReadDynsymName>;  // Symbol name (index into string table)
+	Elf32_Addr	st_value; // Value or address associated with the symbol
+	Elf32_Word	st_size;  // Size of the symbol
+	unsigned char st_info;  // Symbol's type and binding attributes
+	unsigned char st_other; // Must be zero; reserved
+	Elf32_Half	st_shndx; // Which section (header table index) it's defined in
+
+	if (st_size) {
+		local quad off = FTell();
+		FSeek( st_value );
+		uchar data[st_size];
+		FSeek( off );
+	}
+
+	local string name = ReadDynsymName(st_name);
+	if (Strcmp(name, "oatdata") == 0) {
+		oatdata_off = st_value;
+	}
+
+} Elf32_Sym <optimize=false>;
+
+// local int iter;
+int FindNamedSection( string sect ) {
+	local int i;
+	local string shdr_nn;
+	
+	for(i=0; i<file.elf_header.e_shnum; i++ ) {
+		shdr_nn = ReadShdrName(file.elf_section_header[i].sh_name);
+		if( Strcmp( shdr_nn, sect ) == 0 ) {
+			return i;
+		}
+	}
+	
+	return -1;
+}
+
+string ReadSection(Elf32_Shdr &shdr) {
+	// Printf("section_name_off=%x", shdr.sh_name);
+	return ReadShdrName(shdr.sh_name);
+}
+
+string ReadDynsymItem(Elf32_Sym &sym) {
+	// Printf("section_name_off=%x", shdr.sh_name);
+	return ReadDynsymName(sym.st_name);
+}
+
+typedef enum {
+  kNone,
+  kArm,
+  kThumb2,
+  kX86,
+  kMips
+} InstructionSet;
+
+/////////////////////////////////////////////////////////////////////////////////
+//  DexFile format
+/////////////////////////////////////////////////////////////////////////////////
+
+// struct to read a uleb128 value. uleb128's are a variable-length encoding for
+// a 32 bit value. some of the uleb128/sleb128 code was adapted from dalvik's
+// libdex/Leb128.h
+
+typedef struct {
+	ubyte val <comment="uleb128 element">;
+	if(val > 0x7f) {
+		ubyte val <comment="uleb128 element">;
+		if (val > 0x7f) {
+			ubyte val <comment="uleb128 element">;
+			if(val > 0x7f) {
+				ubyte val <comment="uleb128 element">;
+				if(val > 0x7f) {
+					ubyte val <comment="uleb128 element">;
+				}
+			}
+		}
+	}
+} uleb128 <read=ULeb128Read, comment="Unsigned little-endian base 128 value">;
+
+// get the actual uint value of the uleb128
+uint uleb128_value(uleb128 &u) {
+	local uint result;
+	local ubyte cur;
+
+	result = u.val[0];
+	if(result > 0x7f) {
+		cur = u.val[1];
+		result = (result & 0x7f) | (uint)((cur & 0x7f) << 7);
+		if(cur > 0x7f) {
+			cur = u.val[2];
+			result |= (uint)(cur & 0x7f) << 14;
+			if(cur > 0x7f) {
+				cur = u.val[3];
+				result |= (uint)(cur & 0x7f) << 21;
+				if(cur > 0x7f) {
+					cur = u.val[4];
+					result |= (uint)cur << 28;
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
+string ULeb128Read(uleb128 &u) {
+	local string s;
+	s = SPrintf(s, "0x%X", uleb128_value(u));
+	return s;
+}
+
+typedef struct {
+	char magic_[8];
+	uint32 checksum_;  // See also location_checksum_
+	uchar signature_[20];
+	uint32 file_size;  // size of entire file
+	uint32 header_size;  // offset to start of next section
+	uint32 endian_tag;
+	uint32 link_size;  // unused
+	uint32 link_off;  // unused
+	uint32 map_off;  // unused
+	uint32 string_ids_size;  // number of StringIds
+	uint32 string_ids_off;  // file offset of StringIds array
+	uint32 type_ids_size;  // number of TypeIds, we don't support more than 65535
+	uint32 type_ids_off;  // file offset of TypeIds array
+	uint32 proto_ids_size;  // number of ProtoIds, we don't support more than 65535
+	uint32 proto_ids_off;  // file offset of ProtoIds array
+	uint32 field_ids_size;  // number of FieldIds
+	uint32 field_ids_off;  // file offset of FieldIds array
+	uint32 method_ids_size;  // number of MethodIds
+	uint32 method_ids_off;  // file offset of MethodIds array
+	uint32 class_defs_size;  // number of ClassDefs
+	uint32 class_defs_off;  // file offset of ClassDef array
+	uint32 data_size;  // unused
+	uint32 data_off;  // unused
+} DexFileHeader;
+
+local int odexpad = 0;
+
+//////////////////////////////////////////////////
+// String IDs
+//////////////////////////////////////////////////
+
+typedef struct {
+	uleb128 utf16_size <comment="Size of string in UTF-16 code units">;
+	string data <comment="A string in MUTF-8 format">;
+} DexFileStringItem;
+
+typedef struct {
+	uint string_data_off <comment="File offset of string data">;
+	
+	local int64 pos = FTell();
+	FSeek(odexpad + string_data_off);
+
+	DexFileStringItem string_data <comment="String item">;
+	
+	FSeek(pos);
+} DexFileStringId <read=StringDataReader, optimize=false>;
+
+string StringDataReader(DexFileStringId &i) {
+	return i.string_data.data;
+}
+
+typedef struct (int size) {
+	local int s = size;
+	DexFileStringId string_ids[size] <comment="String ID">;
+} DexFileStringIds <read=StringIDListRead, comment="String ID list">;
+
+string StringIDListRead(DexFileStringIds &l) {
+	string s;
+	s = SPrintf(s, "%d strings", l.s);
+	return s;
+}
+
+//////////////////////////////////////////////////
+// type IDs
+//////////////////////////////////////////////////
+
+// read a value from the string table
+string StringIdRead(int id) {
+	if(id == NO_INDEX) {
+		return "NO_INDEX";
+	}
+	
+	local string s;
+	SPrintf(s, "(0x%.X) \"%s\"", id, GetStringById(id));
+	return s;
+}
+
+// read a string from the string table
+string GetStringById(int id) {
+	if(id == NO_INDEX) {
+		return "NO_INDEX";
+	}
+
+	if(exists(dex_string_ids.string_id[id])) {
+		return dex_string_ids.string_id[id].string_data.data;
+	} else {
+		return "*** NO STRING";
+	}
+}
+
+string GetTypeById(struct DexFile& dexfile, int id) {
+   if(id == NO_INDEX) {
+		return "NO_INDEX";
+	}
+
+	if(exists(dex_type_ids.type_id[id])) {
+		return GetStringById2(dexfile, dexfile.dex_type_ids.type_id[id].descriptor_idx);
+	} else {
+		return "*** NO TYPE";
+	}
+}
+
+string GetLongTypeDescriptor(string descriptor) {
+	local string desc = "";
+	local string post = "";
+	local int i = 0;
+	local int len = Strlen(descriptor);
+
+	// array descriptors
+	while(descriptor[i] == '[') {
+		post += "[]";
+		i++;
+
+		if(i >= len) return "ERROR";
+	}
+
+	if(descriptor[i] == 'L') {
+		// fully qualified class descriptors
+		i++;
+		while(i < len) {
+			if(descriptor[i] == '/') desc += ".";
+			else if(descriptor[i] == ';') break;
+			else desc += descriptor[i];
+			i++;
+		}
+	} else {
+		// simple type descriptors
+		switch(descriptor[i]) {
+			case 'V': desc = "void"; break;
+			case 'Z': desc = "boolean"; break;
+			case 'B': desc = "byte"; break;
+			case 'S': desc = "short"; break;
+			case 'C': desc = "char"; break;
+			case 'I': desc = "int"; break;
+			case 'J': desc = "long"; break;
+			case 'F': desc = "float"; break;
+			case 'D': desc = "double"; break;
+		}
+	}
+
+	return desc + post;
+}
+
+string GetLongTypeById(int id) {
+	return GetLongTypeDescriptor(GetTypeById(id));
+}
+
+string GetMethodById(int id) {
+	if(id == NO_INDEX) {
+		return "NO_INDEX";
+	}
+
+	if(exists(dex_method_ids.method_id[id])) {
+		return MethodIdItemRead(dex_method_ids.method_id[id]);
+	} else {
+		return "*** NO METHOD";
+	}
+}
+
+string GetFieldById(int id) {
+	if(id == NO_INDEX) {
+		return "NO_INDEX";
+	}
+
+	if(exists(dex_field_ids.field_id[id])) {
+		return FieldIdItemRead(dex_field_ids.field_id[id]);
+	} else {
+		return "*** NO FIELD";
+	}
+}
+
+typedef struct {
+	uint descriptor_idx <comment="String ID for this type descriptor">;
+	local string name = GetStringById2(parentof(parentof(this)), descriptor_idx);
+} DexFileTypeId <read=TypeIDRead, optimize=false>;
+
+string GetStringById2(struct DexFile& dexfile, int id) {
+	 if(id == NO_INDEX) {
+		return "NO_INDEX";
+	}
+
+	if(exists(dexfile.dex_string_ids.string_ids[id])) {
+		return dexfile.dex_string_ids.string_ids[id].string_data.data;
+	} else {
+		return "*** NO STRING";
+	}
+}
+
+string TypeIDRead(DexFileTypeId &i) {
+	return i.name;
+}
+
+typedef struct (int size) {
+	local int s = size;
+	DexFileTypeId type_id[size] <comment="Type ID">;
+} DexFileTypeIds <read=TypeIDListRead>;
+
+string TypeIDListRead(DexFileTypeIds &l) {
+	string s;
+	s = SPrintf(s, "%d types", l.s);
+	return s;
+}
+
+// proto 
+
+typedef struct {
+	ushort type_idx <comment="Index into type_ids list">;
+	local string type = GetLongTypeDescriptor(GetTypeById(parentof(parentof(parentof(parentof(this)))), return_type_idx));
+} DexFileTypeItem <optimize=false>;
+
+typedef struct {
+	uint size <comment="Number of entries in type list">;
+	DexFileTypeItem list[size] <read=TypeItemRead, comment="Type entry">;
+} DexFileTypeList <read=TypeItemListRead, optimize=false>;
+
+string TypeItemRead(DexFileTypeItem &t) {
+	return t.type;
+}
+
+string TypeItemListRead(DexFileTypeList &l) {
+	string s = "";
+	string tmp;
+	int i;
+
+	for(i = 0; i < l.size; i++) {
+		s += l.list[i].type;
+		if(i+1 < l.size) {
+			s += ", ";
+		}
+	}
+	return s;
+}
+
+typedef struct {
+	uint shorty_idx <comment="String ID of short-form descriptor">;
+	local string shorty = GetStringById2(parentof(parentof(this)), shorty_idx);
+	
+	uint return_type_idx <comment="Type ID of the return type">;
+	local string return_type = GetLongTypeDescriptor(GetTypeById(parentof(parentof(this)), return_type_idx));
+	
+	uint parameters_off <comment="File offset of parameter type list">;
+
+	if(parameters_off != 0) {
+		local int64 pos = FTell();
+		FSeek(odexpad + parameters_off);
+
+		DexFileTypeList parameters <comment="Prototype parameter data">;
+	
+		FSeek(pos);
+	}
+
+} DexFileProtoId <read=ProtoIDItemRead, optimize=false>;
+
+string ProtoIDItemRead(DexFileProtoId &i) {
+	return GetPrototypeSignature(i);
+}
+
+string GetParameterListString(DexFileTypeList &l) {
+	local string s = "(";
+	local string tmp;
+	local int i;
+
+	for(i = 0; i < l.size; i++) {
+		s += l.list[i].type;
+		if(i+1 < l.size) {
+			s += ", ";
+		}
+	}
+	return s + ")";
+}
+
+string GetPrototypeSignature(DexFileProtoId &item) {
+	string ret = item.return_type;
+	string params = "()";
+	if(exists(item.parameters)) {
+		params = GetParameterListString(item.parameters);
+	} 
+
+	return ret + " " + params;
+}
+
+typedef struct (int size) {
+	local int s = size;
+	DexFileProtoId proto_id[size] <comment="Prototype ID">;
+} DexFileProtoIds <read=ProtoIDListRead>;
+
+string ProtoIDListRead(DexFileProtoIds &l) {
+	string s;
+	s = SPrintf(s, "%d protot ypes", l.s);
+	return s;
+}
+
+
+//////////////////////////////////////////////////
+// fields
+//////////////////////////////////////////////////
+
+typedef struct {
+	ushort class_idx <comment="Type ID of the class that defines this field">;
+	local string class = GetLongTypeDescriptor(GetTypeById(parentof(parentof(this)), class_idx));
+	
+	ushort type_idx <comment="Type ID for the type of this field">;
+	local string type = GetLongTypeDescriptor(GetTypeById(parentof(parentof(this)), type_idx));
+	
+	uint name_idx <comment="String ID for the field's name">;
+	local string name = GetStringById2(parentof(parentof(this)), name_idx);
+	
+} DexFileFieldId <read=FieldIdItemRead, optimize=false>;
+
+string FieldIdItemRead(DexFileFieldId &i) {
+	return  i.type + " " + i.class + " : " + i.name;
+}
+
+typedef struct (int size) {
+	local int s = size;
+	DexFileFieldId field_id[size] <comment="Field ID">;
+} DexFileFieldIds <read=FieldIDListRead>;
+
+string FieldIDListRead(DexFileFieldIds &l) {
+	string s;
+	s = SPrintf(s, "%d fields", l.s);
+	return s;
+}
+
+//////////////////////////////////////////////////
+// methods
+//////////////////////////////////////////////////
+
+typedef struct {
+	ushort class_idx <comment="Type ID of the class that defines this method">;
+	local string class = GetLongTypeDescriptor(GetTypeById(parentof(parentof(this)), class_idx));
+	
+	ushort proto_idx <comment="Prototype ID for this method">;
+	local string proto = "";
+	
+	uint name_idx <comment="String ID for the method's name">;
+	local string name = GetStringById2(parentof(parentof(this)), name_idx);
+} DexFileMethodId <read=MethodIdItemRead, optimize=false>;
+
+string ProtoIdxRead(ushort p) {
+	string s;
+	SPrintf(s, "(0x%X) %s", p, GetPrototypeSignature(dex_proto_ids.proto_id[p]));
+	return s;
+}
+
+string MethodIdItemRead(DexFileMethodId &m) {
+//	local string retval = GetLongTypeDescriptor(GetTypeById(dex_proto_ids.proto_id[m.proto_idx].return_type_idx));
+//	local string classname = GetLongTypeDescriptor(GetStringById(dex_type_ids.type_id[m.class_idx].descriptor_idx));
+//	local string methodname = GetStringById(m.name_idx);
+//	local string params = "()";
+//	if(exists(dex_proto_ids.proto_id[m.proto_idx].parameters)) {
+//		params = GetParameterListString(dex_proto_ids.proto_id[m.proto_idx].parameters);
+//	} 
+	return m.proto + " " + m.class + "." + m.name;
+}
+
+typedef struct (int size) {
+	local int s = size;
+	DexFileMethodId method_id[size] <comment="Method ID">;
+} DexFileMethodIds <read=MethodIDListRead>;
+
+string MethodIDListRead(DexFileMethodIds &l) {
+	string s;
+	s = SPrintf(s, "%d methods", l.s);
+	return s;
+}
+
+////
+
+// access flags. some of these mean different things for different items (class/field/method)
+typedef enum <uint> {
+	ACC_PUBLIC = 0x1,
+	ACC_PRIVATE = 0x2,
+	ACC_PROTECTED = 0x4,
+	ACC_STATIC = 0x8,
+	ACC_FINAL = 0x10,
+	ACC_SYNCHRONIZED = 0x20,
+	ACC_VOLATILE = 0x40, // field
+	//ACC_BRIDGE = 0x40, // method
+	ACC_TRANSIENT = 0x80, // field
+	//ACC_VARARGS = 0x80, // method
+	ACC_NATIVE = 0x100,
+	ACC_INTERFACE = 0x200,
+	ACC_ABSTRACT = 0x400,
+	ACC_STRICT = 0x800,
+	ACC_SYNTHETIC = 0x1000,
+	ACC_ANNOTATION = 0x2000,
+	ACC_ENUM = 0x4000,
+	ACC_CONSTRUCTOR = 0x10000,
+	ACC_DECLARED_SYNCHRONIZED = 0x20000
+} ACCESS_FLAGS <read=AccessFlagsRead>;
+
+string AccessFlagsRead(ACCESS_FLAGS f) {
+	string ret = "";
+	string flags = "";
+	ACCESS_FLAGS i = 1;
+
+	while(i <= ACC_DECLARED_SYNCHRONIZED) {
+		if (f & i) {
+			flags += EnumToString(i) + " ";
+		}
+		i = i << 1;
+	}
+
+	SPrintf(ret, "(0x%X) %s", f, flags);
+	return ret;
+}
+
+
+typedef enum {
+    AF_CLASS, AF_FIELD, AF_METHOD
+} AF_TYPE;
+
+string GetFriendlyAccessFlag(int flag, AF_TYPE type) {
+    switch (flag) {
+        case ACC_PUBLIC: return "public";
+        case ACC_PRIVATE: return "private";
+        case ACC_PROTECTED: return "protected";
+        case ACC_STATIC: return "static";
+        case ACC_FINAL: return "final";
+        case ACC_SYNCHRONIZED: return "synchronized";
+        case ACC_VOLATILE:
+            if(type == AF_FIELD) return "volatile";
+            else return "bridge"; // 0x40 is 'bridge' for methods
+        case ACC_TRANSIENT:
+            if(type == AF_FIELD) return "transient";
+            else return "varargs"; // 0x80 is 'varargs' for methods
+        case ACC_NATIVE: return "native";
+        case ACC_INTERFACE: return "interface";
+        case ACC_ABSTRACT: return "abstract";
+        case ACC_STRICT: return "strict";
+        case ACC_SYNTHETIC: return "synthetic";
+        case ACC_ANNOTATION: return "annotation";
+        case ACC_ENUM: return "enum";
+        case ACC_CONSTRUCTOR: return "constructor";
+        case ACC_DECLARED_SYNCHRONIZED: return "declared-synchronized";
+    }
+    return "ERROR";
+}
+
+string GetFriendlyAccessFlags(ACCESS_FLAGS f, AF_TYPE type) {
+    string flags = "";
+    ACCESS_FLAGS i = 1;
+
+    while(i <= ACC_DECLARED_SYNCHRONIZED) {
+        if (f & i) {
+            flags += GetFriendlyAccessFlag(i, type) + " ";
+        }
+        i = i << 1;
+    }
+
+    return flags;
+}
+
+typedef struct {
+	uleb128 static_fields_size <comment="The number of static fields">;
+	uleb128 instance_fields_size <comment="The number of instance fields">;
+	uleb128 direct_methods_size <comment="The number of direct methods">;
+	uleb128 virtual_methods_size <comment="The number of virtual methods">;
+
+	if(uleb128_value(static_fields_size) > 0) {
+//		encoded_field_list static_fields(uleb128_value(static_fields_size)) <comment="Encoded sequence of static fields">;
+	}
+
+	if(uleb128_value(instance_fields_size) > 0) {
+//		encoded_field_list instance_fields(uleb128_value(instance_fields_size)) <comment="Encoded sequence of instance fields">;
+	}
+
+	if(uleb128_value(direct_methods_size) > 0) {
+//		encoded_method_list direct_methods(uleb128_value(direct_methods_size)) <comment="Encoded sequence of direct methods">;
+	}
+
+	if(uleb128_value(virtual_methods_size) > 0) {
+//		encoded_method_list virtual_methods(uleb128_value(virtual_methods_size)) <comment="Encoded sequence of virtual methods">;
+	}
+} DexFileClassData <read=ClassDataItemRead>;
+
+string ClassDataItemRead(DexFileClassData &i) {
+	local string s;
+	SPrintf(s, "%i static fields, %i instance fields, %i direct methods, %i virtual methods",
+		uleb128_value(i.static_fields_size), uleb128_value(i.instance_fields_size), 
+		uleb128_value(i.direct_methods_size), uleb128_value(i.virtual_methods_size));
+	return s;
+}
+
+typedef struct {
+	local int64 pos;
+
+	uint class_idx <comment="Type ID for this class">;
+	local string class = GetLongTypeDescriptor(GetTypeById(parentof(parentof(this)), class_idx));
+	
+	ACCESS_FLAGS access_flags <comment="Access flags">;
+	uint superclass_idx <read=LongTypeIdRead, comment="Type ID for this class's superclass">;
+	local string superclass = GetLongTypeDescriptor(GetTypeById(parentof(parentof(this)), superclass_idx));
+
+	uint interfaces_off <comment="File offset to interface list">;
+	if(interfaces_off != 0) {
+		pos = FTell();
+		FSeek(odexpad + interfaces_off);
+		// type_item_list interfaces <read=InterfacesRead, comment="Interface data">;
+		FSeek(pos);
+	}
+
+	uint source_file_idx <comment="String ID for the name of the file with this class defined">;
+	local string source_path = GetStringById2(parentof(parentof(this)), source_file_idx);
+
+	uint annotations_off <comment="File offset to the annotation structure for this class">;
+	if(annotations_off != 0) {
+		pos = FTell();
+		FSeek(odexpad + annotations_off);
+		// annotations_directory_item annotations <comment="Annotation data">;
+		FSeek(pos);
+	}
+
+	uint class_data_off <comment="File offset to the class data for this class">;
+	if(class_data_off != 0) {
+		pos = FTell();
+		FSeek(odexpad + class_data_off);
+		DexFileClassData class_data <comment="Class data">;
+		FSeek(pos);
+	}
+
+	uint static_values_off <comment="File offset to static field data">;
+	if(static_values_off != 0) {
+		pos = FTell();
+		FSeek(odexpad + static_values_off);
+		// struct encoded_array_item static_values <comment="Static values">;
+		FSeek(pos);		
+	}
+} DexFileClassDefItem <read=ClassDefItemRead, optimize=false>;
+
+string ClassDefItemRead(DexFileClassDefItem &i) {
+	local string flags = GetFriendlyAccessFlags(i.access_flags, AF_CLASS);
+	return flags + i.class;
+}
+
+typedef struct (int size) {
+	local int s = size;
+	DexFileClassDefItem class_def[size] <comment="Class ID">;
+} DexFileClassDefs <read=ClassDefItemListRead>;
+
+string ClassDefItemListRead(DexFileClassDefs &l) {
+	string s;
+	s = SPrintf(s, "%d classes", l.s);
+	return s;
+}
+
+//////////////////////////////////////////////////
+// map list
+//////////////////////////////////////////////////
+
+enum <ushort> TYPE_CODES {
+	TYPE_HEADER_ITEM = 0x0000,
+	TYPE_STRING_ID_ITEM = 0x0001,
+	TYPE_TYPE_ID_ITEM = 0x0002,
+	TYPE_PROTO_ID_ITEM = 0x0003,
+	TYPE_FIELD_ID_ITEM = 0x0004,
+	TYPE_METHOD_ID_ITEM = 0x0005,
+	TYPE_CLASS_DEF_ITEM = 0x0006,
+
+	TYPE_MAP_LIST = 0x1000,
+	TYPE_TYPE_LIST = 0x1001,
+	TYPE_ANNOTATION_SET_REF_LIST = 0x1002,
+	TYPE_ANNOTATION_SET_ITEM = 0x1003,
+
+	TYPE_CLASS_DATA_ITEM = 0x2000,
+	TYPE_CODE_ITEM = 0x2001,
+	TYPE_STRING_DATA_ITEM = 0x2002,
+	TYPE_DEBUG_INFO_ITEM = 0x2003,
+	TYPE_ANNOTATION_ITEM = 0x2004,
+	TYPE_ENCODED_ARRAY_ITEM = 0x2005,
+	TYPE_ANNOTATIONS_DIRECTORY_ITEM = 0x2006
+};
+
+typedef struct {
+	TYPE_CODES type;
+	ushort unused;
+	uint size;
+	uint offset;  
+} DexFileMapItem <read=MapItemRead>;
+
+string MapItemRead(DexFileMapItem &m) {
+	string s;
+	SPrintf(s, "%s", EnumToString(m.type));
+	return s;
+}
+
+typedef struct {
+	uint size;
+	DexFileMapItem list[size];
+} DexFileMapList <read=MapListTypeRead>;
+
+string MapListTypeRead(DexFileMapList &t) {
+	local string s;
+	SPrintf(s, "%i items", t.size);
+	return s;
+}
+
+//////////////////////////////////////////////////
+// dex file
+//////////////////////////////////////////////////
+
+typedef struct {
+	DexFileHeader header;
+	
+	if(header.map_off != 0) {
+		FSeek(odexpad + header.map_off);
+		DexFileMapList dex_map_list <comment="Map list">;
+		
+		local int i;
+		for (i=0; i<dex_map_list.size; i++) {
+			FSeek(oatdata_off + dex_file_offset + dex_map_list.list[i].offset);
+			if (dex_map_list.list[i].type == TYPE_STRING_ID_ITEM) {
+				DexFileStringIds dex_string_ids(header.string_ids_size) <comment="String ID list">;
+			} else if (dex_map_list.list[i].type == TYPE_TYPE_ID_ITEM) {
+				DexFileTypeIds dex_type_ids(header.type_ids_size) <comment="Type ID list">;
+			} else if (dex_map_list.list[i].type == TYPE_PROTO_ID_ITEM) {
+				DexFileProtoIds dex_proto_ids(header.proto_ids_size) <comment="Proto ID list">;
+			} else if (dex_map_list.list[i].type == TYPE_FIELD_ID_ITEM) {
+				DexFileFieldIds dex_field_ids(header.field_ids_size) <comment="Field ID list">;
+			} else if (dex_map_list.list[i].type == TYPE_METHOD_ID_ITEM) {
+				DexFileMethodIds dex_method_ids(header.method_ids_size) <comment="Method ID list">;
+			} else if (dex_map_list.list[i].type == TYPE_CLASS_DEF_ITEM) {
+				DexFileClassDefs dex_class_defs(header.class_defs_size) <comment="Class Defs">;
+			} else {
+				// uint UNPROCESS_TYPE = dex_map_list.list[i].type;
+			}
+		}
+	}
+} DexFile;
+
+typedef struct {
+	uint32 code_offset_;
+	uint32 frame_size_in_bytes_;
+	uint32 core_spill_mask_;
+	uint32 fp_spill_mask_;
+	uint32 mapping_table_offset_;
+	uint32 vmap_table_offset_;
+	uint32 gc_map_offset_;
+	
+	local uint32 off = code_offset_ & ~0x1;
+	if (off > 0) {
+		Printf("code_offset [%x][%x] = %x\n", code_offset_, off, off + 0x1000);
+	}
+} OatMethodOffsets;
+
+typedef struct (int index) {
+	uint32 status;
+	local int methodCount = getClassMethodCount(parentof(parentof(this)), index);
+	local string name = getClassName(parentof(parentof(this)), index);
+	
+    if (methodCount > 0) {
+	    OatMethodOffsets methodOffset[methodCount] <optimize=false>;
+    }
+} OatClass <read=ReadOatClass, optimize=false>;
+
+string ReadOatClass(OatClass &c) {
+	return c.name;
+}
+
+typedef struct (int size) {
+	local int total = size;
+	local int idx;
+	for (idx=0; idx<size; idx++) {
+		OatClass oat_class(idx);
+	}
+} OatClasses <read=ReadOatClasses>;
+
+string ReadOatClasses(OatClasses &oc) {
+	local string s;
+	SPrintf(s, "%i classes", oc.total);
+	return s;
+}
+
+string getClassName(struct OatDexFile& oatfile, int classIdx) {
+	if (exists(oatfile.dex_file.dex_class_defs.class_def[classIdx])) {
+		return oatfile.dex_file.dex_class_defs.class_def[classIdx].class;
+	}
+	return "** NO NAME **";
+}
+
+int getClassMethodCount(struct OatDexFile& oatfile, int classIdx) {
+	if (exists(oatfile.dex_file.dex_class_defs.class_def[classIdx])) {
+		if (exists(oatfile.dex_file.dex_class_defs.class_def[classIdx].class_data)) {
+			local int dirNum = uleb128_value(oatfile.dex_file.dex_class_defs.class_def[classIdx].class_data.direct_methods_size);
+			local int virNum = uleb128_value(oatfile.dex_file.dex_class_defs.class_def[classIdx].class_data.virtual_methods_size);
+			return dirNum + virNum;
+		}
+	}
+	return 0;
+}
+
+typedef struct {
+	uint32 dex_file_location_size;
+	char   dex_file_location_data[dex_file_location_size];
+	uint32 dex_file_checksum;
+	uint32 dex_file_offset;
+	
+	local quad off = FTell();
+	local quad method_count = (oatdata_off + dex_file_offset - off) / sizeof(uint32);
+	uint32 method_offs[method_count];
+
+	odexpad = oatdata_off + dex_file_offset;
+	FSeek(oatdata_off + dex_file_offset);
+	DexFile dex_file;
+	
+	FSeek(oatdata_off + dex_file_offset + dex_file.header.file_size);
+	OatClasses oat_classes(dex_file.header.class_defs_size) ;
+	
+} OatDexFile <optimize=false>;
+
+typedef struct {
+	char	  magic[4];
+	char	  version[4];
+	uint32	checksum;
+	InstructionSet instruction_set;
+    
+    // oat 031
+    // uint32 InstructionSetFeatures_mask;
+	// end oat 031
+
+	uint32 dex_file_count;
+	uint32 executable_offset_;
+	uint32 interpreter_to_interpreter_bridge_offset_;
+	uint32 interpreter_to_compiled_code_bridge_offset_;
+	uint32 jni_dlsym_lookup_offset_;
+
+    // oat 031
+    // uint32 portable_imt_conflict_trampoline_offset_;
+	// end oat 031
+
+	uint32 portable_resolution_trampoline_offset_;
+	uint32 portable_to_interpreter_bridge_offset_;
+
+    // oat 031
+    // uint32 quick_generic_jni_trampoline_offset_;
+	// uint32 quick_imt_conflict_trampoline_offset_;
+	// end oat 031
+
+	uint32 quick_resolution_trampoline_offset_;
+	uint32 quick_to_interpreter_bridge_offset_;
+
+	uint32 image_file_location_oat_checksum_;
+	uint32 image_file_location_oat_data_begin_;
+	uint32 image_file_location_size;
+	char   image_file_location_data[image_file_location_size];
+} OatHeader;
+
+struct {
+	Elf32_Ehdr elf_header;
+	if (elf_header.e_phnum > 0) {
+		FSeek(elf_header.e_phoff);
+		Elf32_Phdr elf_program_header[elf_header.e_phnum];
+	}
+	
+	local uint soff = elf_header.e_shoff + elf_header.e_shentsize * elf_header.e_shstrndx;
+	section_name_off = ReadUInt(soff + 3 * sizeof( Elf32_Word ) + sizeof( Elf32_Addr ));
+	// Printf("section_name_off=%x", section_name_off);
+
+	if (elf_header.e_shnum > 0) {
+		FSeek(elf_header.e_shoff);
+		Elf32_Shdr elf_section_header[elf_header.e_shnum] <read=ReadSection>;
+
+		local uint strindex = FindNamedSection(".dynstr");
+		dynsym_name_off = elf_section_header[strindex].sh_offset;
+
+		local uint symindex = FindNamedSection(".dynsym");
+		local uint symcount = elf_section_header[symindex].sh_size / sizeof(Elf32_Sym_Fixed);
+		FSeek(elf_section_header[symindex].sh_offset);
+	
+		// dynsym
+		Elf32_Sym symtab[symcount] <read=ReadDynsymItem>;
+		
+		// dynstr
+		if (elf_section_header[strindex].sh_size > 0) {
+			local quad off = FTell();
+			FSeek( dynsym_name_off );
+			char dynstr[elf_section_header[strindex].sh_size];
+			FSeek( off );
+		}
+		
+		// hash
+		local uint hashindex = FindNamedSection(".hash");
+		FSeek( elf_section_header[hashindex].sh_offset );
+		Elf32_Word hash[elf_section_header[hashindex].sh_size];
+		
+		// rodata
+		local uint rodataindex = FindNamedSection(".rodata");
+		FSeek( elf_section_header[rodataindex].sh_offset );
+		uchar rodata[elf_section_header[rodataindex].sh_size];
+		
+		// text
+		local uint textindex = FindNamedSection(".text");
+		FSeek( elf_section_header[textindex].sh_offset );
+		uchar text[elf_section_header[textindex].sh_size];
+		
+		// dynamic
+		local uint dynamicindex = FindNamedSection(".dynamic");
+		FSeek( elf_section_header[dynamicindex].sh_offset );
+		uchar dynamic[elf_section_header[dynamicindex].sh_size];
+		
+		// shstrtab
+		local uint shstrtabindex = FindNamedSection(".shstrtab");
+		FSeek( elf_section_header[shstrtabindex].sh_offset );
+		char shstrtab[elf_section_header[shstrtabindex].sh_size];
+	}
+
+	if (oatdata_off > 0) {
+		FSeek(oatdata_off);
+
+		OatHeader oat_header;
+		OatDexFile dex_files[oat_header.dex_file_count];
+	}
+} file;

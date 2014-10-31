@@ -1,0 +1,362 @@
+//--------------------------------------
+//--- 010 Editor v3.1.3 Binary Template
+//
+// File:
+// Author:
+// Revision:
+// Purpose:
+//--------------------------------------
+
+LittleEndian();
+
+local int UTF8_FLAG = 1<<8;
+local int g_offset = 0;
+
+typedef struct {
+    local int size;
+    ubyte hval <comment="utf8size element">;
+    ubyte lval <comment="utf8size element">;
+    if((hval & 0x80) != 0) {
+        size = (((hval & 0x7F) << 8)) | lval;
+    } else {
+        size = hval;
+    }
+} utf8size <read=Utf8SizeRead, comment="Unsigned little-endian base 128 value">;
+
+string Utf8SizeRead(utf8size &u) {
+    local string s;
+    s = SPrintf(s, "0x%X", u.size);
+    return s;
+}
+
+enum {
+    RES_NULL_TYPE               = 0x0000,
+    RES_STRING_POOL_TYPE        = 0x0001,
+    RES_TABLE_TYPE              = 0x0002,
+    RES_XML_TYPE                = 0x0003,
+
+    // Chunk types in RES_XML_TYPE
+    RES_XML_FIRST_CHUNK_TYPE    = 0x0100,
+    RES_XML_START_NAMESPACE_TYPE= 0x0100,
+    RES_XML_END_NAMESPACE_TYPE  = 0x0101,
+    RES_XML_START_ELEMENT_TYPE  = 0x0102,
+    RES_XML_END_ELEMENT_TYPE    = 0x0103,
+    RES_XML_CDATA_TYPE          = 0x0104,
+    RES_XML_LAST_CHUNK_TYPE     = 0x017f,
+    // This contains a uint32_t array mapping strings in the string
+    // pool back to resource identifiers.  It is optional.
+    RES_XML_RESOURCE_MAP_TYPE   = 0x0180,
+
+    // Chunk types in RES_TABLE_TYPE
+    RES_TABLE_PACKAGE_TYPE      = 0x0200,
+    RES_TABLE_TYPE_TYPE         = 0x0201,
+    RES_TABLE_TYPE_SPEC_TYPE    = 0x0202
+};
+
+/* attributes' types */
+typedef enum<uint> {
+
+	ATTR_NULL 	= 0,
+	ATTR_REFERENCE 	= 1,
+	ATTR_ATTRIBUTE 	= 2,
+	ATTR_STRING 	= 3,
+	ATTR_FLOAT 	= 4,
+	ATTR_DIMENSION 	= 5,
+	ATTR_FRACTION 	= 6,
+	
+	ATTR_FIRSTINT 	= 16,
+
+	ATTR_DEC 	= 16,
+	ATTR_HEX	= 17,
+	ATTR_BOOLEAN	= 18,
+
+	ATTR_FIRSTCOLOR	= 28,
+	ATTR_ARGB8 	= 28,
+	ATTR_RGB8	= 29,
+	ATTR_ARGB4	= 30,
+	ATTR_RGB4	= 31,
+	ATTR_LASTCOLOR	= 31,
+
+	ATTR_LASTINT	= 31,
+} arsc_attr_type;
+
+typedef struct {
+    ushort size;
+    uchar  res0;
+    uchar  dateType <read=ArscAttrTypeRead>;
+    uint   data;
+} arsc_value;
+
+string ArscAttrTypeRead(uchar type) {
+    if (type == ATTR_NULL)
+        return EnumToString( ATTR_NULL );
+    else if (type == ATTR_REFERENCE)
+        return EnumToString( ATTR_REFERENCE );
+    else if (type == ATTR_ATTRIBUTE)
+        return EnumToString( ATTR_ATTRIBUTE );
+    else if (type == ATTR_STRING)
+        return EnumToString( ATTR_STRING );
+    else if (type == ATTR_FLOAT)
+        return EnumToString( ATTR_FLOAT );
+    else if (type == ATTR_DIMENSION)
+        return EnumToString( ATTR_DIMENSION );
+    else if (type == ATTR_FRACTION)
+        return EnumToString( ATTR_FRACTION );
+    else if (type == ATTR_DEC)
+        return EnumToString( ATTR_DEC );
+    else if (type == ATTR_HEX)
+        return EnumToString( ATTR_HEX );
+    else if (type == ATTR_BOOLEAN)
+        return EnumToString( ATTR_BOOLEAN );
+    else if (type == ATTR_ARGB8)
+        return EnumToString( ATTR_ARGB8 );
+    else if (type == ATTR_RGB8)
+        return EnumToString( ATTR_RGB8 );
+    else if (type == ATTR_ARGB4)
+        return EnumToString( ATTR_ARGB4 );
+    else if (type == ATTR_RGB4)
+        return EnumToString( ATTR_RGB4 );
+    else if (type >= ATTR_FIRSTCOLOR && type <= ATTR_LASTCOLOR4)
+        return "ATTR_COLOR";
+    else if (type >= ATTR_FIRSTINT && type <= ATTR_LASTINT)
+        return "ATTR_INT";
+    else
+        return "ATTR_UNKNOW";
+}
+
+typedef struct {
+    ushort type <format=hex>;
+    ushort head_size;
+    uint size;
+} arsc_header;
+
+typedef struct {
+    arsc_header header;
+    uint packageCount;
+} arsc_table;
+
+typedef struct {
+    ushort len;
+    if (len > 0) {
+        wchar_t data[len];
+    }
+} arsc_string;
+
+typedef struct arsc_string_offset_st(uint begin) {
+    uint offset;
+
+    local int64 pos = FTell();
+    local int off = begin + offset;
+    FSeek(g_offset + off);
+
+    arsc_string astr;
+
+    FSeek(pos);
+} arsc_string_offset <read=ArscStringRead, optimize=false>;
+
+string ArscStringRead(arsc_string_offset &o) {
+    if (o.astr.len > 0)
+        return o.astr.data;
+    else
+        return "NULL String";
+}
+
+typedef struct {
+    utf8size len;
+    // Printf( "%d\n", len.size );
+    if (len.size > 0) {
+        char data[len.size];
+    }
+} arsc_string_utf8;
+
+typedef struct arsc_string_offset_utf8_st(uint begin) {
+    uint offset;
+
+    local int64 pos = FTell();
+    local int off = begin + offset;
+    FSeek(g_offset + off);
+
+    arsc_string_utf8 astr;
+
+    FSeek(pos);
+} arsc_string_offset_utf8 <read=ArscStringUtf8Read, optimize=false>;
+
+string ArscStringUtf8Read(arsc_string_offset_utf8 &o) {
+    if (o.astr.len.size > 0)
+        return o.astr.data;
+    else
+        return "NULL String";
+}
+
+typedef struct {
+    local uint begin = FTell();
+    local uint off;
+    local int i;
+
+    arsc_header header;
+    int string_count;
+    int style_count;
+    int flag;
+    int string_offset;
+    int style_offset;
+    for(i=0; i<string_count; i++) {
+        if (flag&UTF8_FLAG) {
+            arsc_string_offset_utf8 string_offsets(begin+string_offset) <comment="String item">;
+        } else {
+            arsc_string_offset string_offsets(begin+string_offset) <comment="String item">;
+        }
+    }
+
+    if (style_count > 0) {
+        uint style_offsets[style_count];
+        off = style_offset - string_offset;
+    } else {
+        off = header.size - string_offset;
+    }
+
+    FSkip(off);
+} arsc_strings;
+
+typedef struct {
+    ushort size;
+    ushort flags;
+    uint keyRef;
+} arsc_entry;
+
+typedef struct {
+    arsc_entry entry;
+    uint parentRef;
+    uint count;
+} arsc_mapentry;
+
+typedef struct {
+    arsc_header header;
+    ubyte id;
+    ubyte res0;
+    ushort res1;
+    uint entryCount;
+    if (entryCount > 0) {
+        uint entrys[entryCount];
+    }
+} arsc_typespec;
+
+typedef struct {
+    uint size;
+    uint imsi;
+    uint locale;
+    uint screenType;
+    uint input;
+    uint screenSize;
+    uint version;
+    uint screenConfig;
+    uint screenSizeDp;
+} arsc_config;
+
+typedef struct {
+    arsc_header header;
+    ubyte id;
+    ubyte res0;
+    ushort res1;
+    uint entryCount;
+    uint entriesStart;
+    
+    arsc_config config;
+    
+    local ushort size;
+    local int i;
+    local uint entryOff;
+    if (entryCount > 0) {
+        uint entryOffsets[entryCount];
+
+        for(i=0; i<entryCount; i++) {
+            entryOff = entryOffsets[i];
+            if (entryOff != 0xFFFFFFFF) {
+                size = ReadUInt(FTell());
+                if (size == sizeof(arsc_entry)) {
+                    arsc_entry entry;
+                    arsc_value value;
+                } else {
+                    arsc_mapentry mapEntry;
+                }
+            }
+        }
+    }
+} arsc_typetype;
+
+typedef struct {
+    local uint begin = FTell();
+
+    arsc_header header;
+    uint id;
+    wchar_t name[128];
+    uint typeStringsOffset;
+    uint lastPublicType;
+    uint keyStringsOffset;
+    uint lastPublicKey;
+
+    arsc_strings typeStrings;
+    arsc_strings keyStrings;
+
+    local ushort htype;
+    local ushort hsize;
+    local uint size = 0;
+
+    local uint cur = FTell();
+    local uint end = begin + header.size;
+    while(cur < end) {
+        htype = ReadUShort(cur);
+        hsize = ReadUShort(cur+2);
+        size = ReadUInt(cur+4);
+
+        // Printf("cur=%x hsize=%d size=%d end=%d\n", cur, hsize, size, end);
+        if (htype == RES_TABLE_TYPE_SPEC_TYPE) {
+            arsc_typespec typeSpec <read=AresTypeSpecRead>;
+        } else if (htype == RES_TABLE_TYPE_TYPE) {
+            arsc_typetype typeType;
+        } else {
+        }
+
+        cur += size;
+        FSeek(cur);
+    };
+} arsc_package;
+
+string AresTypeSpecRead(arsc_typespec &spec) {
+//    local arsc_package pkg = parentof(spec);
+    string ret = "";
+    SPrintf(ret, "~~");
+    return ret;
+}
+
+struct FILE {
+    arsc_table header;
+
+    local ushort htype;
+    local ushort hsize;
+    local uint size = 0;
+    do {
+        htype = ReadUShort(FTell());
+        hsize = ReadUShort(FTell()+2);
+        size = ReadUInt(FTell()+4);
+
+        if (htype == RES_STRING_POOL_TYPE) {
+            arsc_strings strings;
+        } else if (htype == RES_TABLE_PACKAGE_TYPE) {
+            arsc_package package;
+        } else {
+            Printf("not supported header type %d\n", htype);
+            break;
+        }
+    } while(!FEof());
+    
+} file;
+
+string AresStringById(int &index, arsc_strings& strpool) {
+    string ret = "";
+    if (index >= 0 && index < strpool.string_count) {
+        return strpool.string_offsets[index].astr.data;
+    } else {
+        SPrintf(ret, "NULL Out off strings[%d] range %d", file.strings.string_count, index);
+        return ret;
+    }
+}
