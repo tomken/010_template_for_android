@@ -4,9 +4,11 @@
 // File:     OATTemplate.bt
 // Author:   tomken
 // Update:   liumin0
-// Revision: 1.1
+// Revision: 1.2
 // Purpose:  Defines a template for
 //    parsing OAT files.
+// Support:  Android L, Android M, 
+// Mutidex is supported too
 //-----------------------------------
 
 LittleEndian();
@@ -172,17 +174,27 @@ typedef struct {
 
 	if (st_size) {
 		local quad off = FTell();
-		FSeek( st_value );
+		FSeek(  SectionVAddrOffset(st_shndx, st_value) );
 		uchar data[st_size];
 		FSeek( off );
 	}
 
 	local string name = ReadDynsymName(st_name);
 	if (Strcmp(name, "oatdata") == 0) {
-		oatdata_off = st_value;
+		oatdata_off =  SectionVAddrOffset(st_shndx, st_value);
 	}
 
 } Elf32_Sym <optimize=false>;
+
+quad SectionVAddrOffset( Elf32_Half s_index, Elf32_Addr s_vaddr ) {
+	if( s_index < file.elf_header.e_shnum ) {
+		local quad ret = file.elf_section_header[s_index].sh_offset + s_vaddr -
+			file.elf_section_header[s_index].sh_addr;
+        
+        return ret;
+	}
+	return 0;
+}
 
 // local int iter;
 int FindNamedSection( string sect ) {
@@ -228,8 +240,12 @@ LittleEndian();
 #define REVERSE_ENDIAN_CONSTANT (0x78563412);
 
 // offset used when seeking within a dex file inside of an odex wrapper
-local int odexpad = 0;
+//local int odexpad = 0;
+local int dexCount = 0;
 local int odex = 0;
+local quad dexOffs[100];
+local quad defsSize[100];
+local quad oatClassOffs;
 // utility type to show the SHA1 hash in the value column
 typedef ubyte SHA1[20] <read=SHA1Read, format=hex>;
 
@@ -428,6 +444,8 @@ typedef enum <ubyte> {
 
 // variable-width integer used by encoded_value types
 typedef struct (int size, VALUE type) {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     local int s = size + 1;
     local VALUE t = type;
     local int i;
@@ -450,16 +468,16 @@ string EncodedValueRead(EncodedValue &v) {
             SPrintf(s, "0x%X", EncodedValueValue(v));
             break;
         case VALUE_STRING:
-            s = StringIdRead(EncodedValueValue(v));
+            s = StringIdRead(v.dexIndex, EncodedValueValue(v));
             break;
         case VALUE_TYPE:
-            s = LongTypeIdRead(EncodedValueValue(v));
+            s = LongTypeIdRead(v.dexIndex, EncodedValueValue(v));
             break;
         case VALUE_FIELD:
-            s = FieldIdRead(EncodedValueValue(v));
+            s = FieldIdRead(v.dexIndex, EncodedValueValue(v));
             break;
         case VALUE_ENUM:
-            s = FieldIdRead(EncodedValueValue(v));
+            s = FieldIdRead(v.dexIndex, EncodedValueValue(v));
             break;
         case VALUE_ARRAY:
         case VALUE_ANNOTATION:
@@ -489,6 +507,8 @@ int64 EncodedValueValue(EncodedValue &v) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     VALUE value_type:5 <comment="Value type">;
     ubyte value_arg:3 <comment="Value clarifying argument">;
     local string valstr = "";
@@ -533,27 +553,27 @@ typedef struct {
             break;
         case VALUE_STRING:
             EncodedValue value(value_arg, value_type) <comment="String value">;
-            valstr = "\"" + GetStringById(EncodedValueValue(value)) + "\"";
+            valstr = "\"" + GetStringById(dexIndex, EncodedValueValue(value)) + "\"";
             typestr = "string";
             break;
         case VALUE_TYPE:
             EncodedValue value(value_arg, value_type) <comment="Type value">;
-            valstr = GetLongTypeById(EncodedValueValue(value));
+            valstr = GetLongTypeById(dexIndex, EncodedValueValue(value));
             typestr = "type";
             break;
         case VALUE_FIELD:
             EncodedValue value(value_arg, value_type) <comment="Field value">;
-            valstr = GetFieldById(EncodedValueValue(value));
+            valstr = GetFieldById(dexIndex, EncodedValueValue(value));
             typestr = "field";
             break;
         case VALUE_METHOD:
             EncodedValue value(value_arg, value_type) <comment="Method value">;
-            valstr = GetMethodById(EncodedValueValue(value));
+            valstr = GetMethodById(dexIndex, EncodedValueValue(value));
             typestr = "method";
             break;
         case VALUE_ENUM:
             EncodedValue value(value_arg, value_type) <comment="Enum value">;
-            valstr = GetFieldById(EncodedValueValue(value));
+            valstr = GetFieldById(dexIndex, EncodedValueValue(value));
             typestr = "enum";
             break;
         case VALUE_ARRAY:
@@ -587,8 +607,15 @@ string EncodedValueStructRead(encoded_value &v) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 size <comment="Number of elements in array">;
-    encoded_value values[uleb128_value(size)] <comment="Encoded value element">;
+    local uint valueSize = uleb128_value(size);
+    if (valueSize != 0) {
+        encoded_value values[uleb128_value(size)] <comment="Encoded value element">;
+    }
+    
+    
 } encoded_array <read=EncodedArrayRead>;
 
 // show first 5 elements of the array
@@ -619,18 +646,21 @@ string EncodedArrayRead(encoded_array &a) {
 
     return val;
 }
-
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 name_idx <read=StringIdReadUleb, comment="String ID of annotation element name">;
     encoded_value value <comment="Encoded value">;
 } annotation_element <read=AnnotationElementRead, optimize=false>;
 
 string AnnotationElementRead(annotation_element &e) {
-    string name = GetStringById(uleb128_value(e.name_idx));
+    string name = GetStringById(e.dexIndex, uleb128_value(e.name_idx));
     return name + " = " + e.value.valstr;
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 type_idx <read=LongTypeIdReadUleb, comment="Annotation type">;
     uleb128 size <comment="Number of name-value mappings in annotation">;
 
@@ -641,7 +671,7 @@ typedef struct {
 
 string EncodedAnnotationRead(encoded_annotation &a) {
     string s;
-    SPrintf(s, "%i annotations for %s", uleb128_value(a.size), GetLongTypeById(uleb128_value(a.type_idx)));
+    SPrintf(s, "%i annotations for %s", uleb128_value(a.size), GetLongTypeById(a.dexIndex, uleb128_value(a.type_idx)));
     return s;
 }
 
@@ -650,6 +680,14 @@ string EncodedAnnotationRead(encoded_annotation &a) {
 //////////////////////////////////////////////////
 
 typedef struct {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = parentAddr;
+    local int dexIndex = i;
     dex_magic magic <comment="Magic value">; 
 
     // local uint file_start = 0;
@@ -765,7 +803,7 @@ typedef struct {
         SetBackColor(cLtRed);
         char extra_padding[header_size - 0x70];
     }
-} header_item <size=readHeaderItemSize>;
+} header_item <optimize=false, size=readHeaderItemSize>;
 
 int readHeaderItemSize(header_item &item) {
     return ReadUInt(startof(item)+36);
@@ -828,15 +866,19 @@ string DexOptFlagsRead(DEX_OPT_FLAGS f) {
 //////////////////////////////////////////////////
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 utf16_size <comment="Size of string in UTF-16 code units">;
     string data <comment="A string in MUTF-8 format">;
 } string_item;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint string_data_off <comment="File offset of string data">;
     
     local int64 pos = FTell();
-    FSeek(odexpad + string_data_off);
+    FSeek(baseAddr + string_data_off);
 
     string_item string_data <comment="String item">;
     
@@ -848,6 +890,14 @@ string StringDataReader(string_id_item &i) {
 }
 
 typedef struct (int size) {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     local int s = size;
     string_id_item string_id[size] <comment="String ID">;
 } string_id_list <read=StringIDListRead, comment="String ID list">;
@@ -861,16 +911,35 @@ string StringIDListRead(string_id_list &l) {
 //////////////////////////////////////////////////
 // type IDs
 //////////////////////////////////////////////////
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    uint idx <comment = "id">;
+} id_string <read = id_stringRead, optimize = false>;
+
+string id_stringRead(id_string &s) {
+    return StringIdRead(s.dexIndex, s.idx);
+}
 
 typedef struct {
-    uint descriptor_idx <read=StringIdRead, comment="String ID for this type descriptor">;
-} type_id_item <read=TypeIDRead, optimize=false>;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    id_string descriptor_idx <comment="String ID for this type descriptor">;
+} type_id_item <read=TypeIDItemRead, optimize=false>;
 
-string TypeIDRead(type_id_item &i) {
-    return GetLongTypeDescriptor(GetStringById(i.descriptor_idx));
+string TypeIDItemRead(type_id_item &i) {
+    return GetLongTypeDescriptor(GetStringById(i.dexIndex, i.descriptor_idx.idx));
 }
 
 typedef struct (int size) {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     local int s = size;
     type_id_item type_id[size] <comment="Type ID">;
 } type_id_list <read=TypeIDListRead, optimize=false>;
@@ -885,10 +954,14 @@ string TypeIDListRead(type_id_list &l) {
 // type list
 //////////////////////////////////////////////////
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     ushort type_idx <comment="Index into type_ids list">;
-} type_item <size=2>;
+} type_item <optimize=false>;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint size <comment="Number of entries in type list">;
     
      if(size != 0) {
@@ -897,7 +970,7 @@ typedef struct {
 } type_item_list <read=TypeItemListRead, optimize=false>;
 
 string TypeItemRead(type_item &t) {
-    return GetTypeById(t.type_idx);
+    return GetTypeById(t.dexIndex, t.type_idx);
 }
 
 string TypeItemListRead(type_item_list &l) {
@@ -906,7 +979,7 @@ string TypeItemListRead(type_item_list &l) {
     int i;
 
     for(i = 0; i < l.size; i++) {
-        s += GetTypeById(l.list[i].type_idx);
+        s += GetTypeById(l.dexIndex, l.list[i].type_idx);
         if(i+1 < l.size) {
             s += ", ";
         }
@@ -958,28 +1031,47 @@ string GetLongTypeDescriptor(string descriptor) {
 //////////////////////////////////////////////////
 // protoypes
 //////////////////////////////////////////////////
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    uint idx <comment="id">;
+} type_string <read=type_stringRead, optimize=false>;
+
+string type_stringRead(type_string &s) {
+    return TypeIdRead(s.dexIndex, s.idx);
+}
 
 typedef struct {
-    uint shorty_idx <read=StringIdRead, comment="String ID of short-form descriptor">;
-    uint return_type_idx <read=TypeIdRead, comment="Type ID of the return type">;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    uint shorty_idx <comment="String ID of short-form descriptor">;
+    type_string return_type_idx <comment="Type ID of the return type">;
     uint parameters_off <comment="File offset of parameter type list">;
 
     if(parameters_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + parameters_off);
+        FSeek(baseAddr + parameters_off);
 
         type_item_list parameters <comment="Prototype parameter data">;
     
         FSeek(pos);
     }
 
-} proto_id_item <read=ProtoIDItemRead, optimize=false, size=12>;
+} proto_id_item <read=ProtoIDItemRead, optimize=false>;
 
 string ProtoIDItemRead(proto_id_item &i) {
     return GetPrototypeSignature(i);
 }
 
 typedef struct (int size) {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     local int s = size;
     proto_id_item proto_id[size] <comment="Prototype ID">;
 } proto_id_list <read=ProtoIDListRead, optimize=true>;
@@ -996,7 +1088,7 @@ string GetParameterListString(type_item_list &l) {
     local int i;
 
     for(i = 0; i < l.size; i++) {
-        s += GetLongTypeDescriptor(GetTypeById(l.list[i].type_idx));
+        s += GetLongTypeDescriptor(GetTypeById(l.dexIndex, l.list[i].type_idx));
         if(i+1 < l.size) {
             s += ", ";
         }
@@ -1005,7 +1097,7 @@ string GetParameterListString(type_item_list &l) {
 }
 
 string GetPrototypeSignature(proto_id_item &item) {
-    string ret = GetLongTypeDescriptor(GetTypeById(item.return_type_idx));
+    string ret = GetLongTypeDescriptor(GetTypeById(item.dexIndex, item.return_type_idx.idx));
     string params = "()";
     if(exists(item.parameters)) {
         params = GetParameterListString(item.parameters);
@@ -1017,22 +1109,41 @@ string GetPrototypeSignature(proto_id_item &item) {
 //////////////////////////////////////////////////
 // fields
 //////////////////////////////////////////////////
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    ushort idx <comment = "id">;
+} long_type_string <read = long_type_stringRead, optimize = false>;
+
+string long_type_stringRead(long_type_string &s) {
+    return LongTypeIdRead(s.dexIndex, s.idx);
+}
 
 typedef struct {
-    ushort class_idx <read=LongTypeIdRead, comment="Type ID of the class that defines this field">;
-    ushort type_idx <read=LongTypeIdRead, comment="Type ID for the type of this field">;
-    uint name_idx <read=StringIdRead, comment="String ID for the field's name">;
-} field_id_item <read=FieldIdItemRead, optimize=false, size=8>;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    long_type_string class_idx <comment="Type ID of the class that defines this field">;
+    long_type_string type_idx <comment="Type ID for the type of this field">;
+    id_string name_idx <comment="String ID for the field's name">;
+} field_id_item <read=FieldIdItemRead, optimize=false>;
 
 string FieldIdItemRead(field_id_item &i) {
-    local string type = GetLongTypeDescriptor(GetTypeById(i.type_idx));
-    local string class = GetLongTypeDescriptor(GetTypeById(i.class_idx));
-    local string name = GetStringById(i.name_idx);
+    local string type = GetLongTypeDescriptor(GetTypeById(i.dexIndex, i.type_idx.idx));
+    local string class = GetLongTypeDescriptor(GetTypeById(i.dexIndex, i.class_idx.idx));
+    local string name = GetStringById(i.dexIndex, i.name_idx.idx);
 
     return type + " " + class + "." + name;
 }
 
 typedef struct (int size) {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     local int s = size;
     field_id_item field_id[size] <comment="Field ID">;
 } field_id_list <read=FieldIDListRead, optimize=true>;
@@ -1046,31 +1157,50 @@ string FieldIDListRead(field_id_list &l) {
 //////////////////////////////////////////////////
 // methods
 //////////////////////////////////////////////////
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    ushort idx <comment = "id">;
+} proto_id_string <read = proto_id_stringRead, optimize = false>;
+
+string proto_id_stringRead(proto_id_string &s) {
+    return ProtoIdxRead(s.dexIndex, s.idx);
+}
 
 typedef struct {
-    ushort class_idx <read=LongTypeIdRead, comment="Type ID of the class that defines this method">;
-    ushort proto_idx <read=ProtoIdxRead, comment="Prototype ID for this method">;
-    uint name_idx <read=StringIdRead, comment="String ID for the method's name">;
-} method_id_item <read=MethodIdItemRead, optimize=false, size=8>;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    long_type_string class_idx <comment="Type ID of the class that defines this method">;
+    proto_id_string proto_idx <comment="Prototype ID for this method">;
+    id_string name_idx <comment="String ID for the method's name">;
+} method_id_item <read=MethodIdItemRead, optimize=false>;
 
-string ProtoIdxRead(ushort p) {
+string ProtoIdxRead(int dexIndex, ushort p) {
     string s;
-    SPrintf(s, "(0x%X) %s", p, GetPrototypeSignature(file.dex_files[0].dex_file.dex_proto_ids.proto_id[p]));
+    SPrintf(s, "(0x%X) %s", p, GetPrototypeSignature(file.dex_files[dexIndex].dex_proto_ids.proto_id[p]));
     return s;
 }
 
 string MethodIdItemRead(method_id_item &m) {
-    local string retval = GetLongTypeDescriptor(GetTypeById(file.dex_files[0].dex_file.dex_proto_ids.proto_id[m.proto_idx].return_type_idx));
-    local string classname = GetLongTypeDescriptor(GetStringById(file.dex_files[0].dex_file.dex_type_ids.type_id[m.class_idx].descriptor_idx));
-    local string methodname = GetStringById(m.name_idx);
+    local string retval = GetLongTypeDescriptor(GetTypeById(m.dexIndex, file.dex_files[m.dexIndex].dex_proto_ids.proto_id[m.proto_idx.idx].return_type_idx.idx));
+    local string classname = GetLongTypeDescriptor(GetStringById(m.dexIndex, file.dex_files[m.dexIndex].dex_type_ids.type_id[m.class_idx.idx].descriptor_idx.idx));
+    local string methodname = GetStringById(m.dexIndex, m.name_idx.idx);
     local string params = "()";
-    if(exists(file.dex_files[0].dex_file.dex_proto_ids.proto_id[m.proto_idx].parameters)) {
-        params = GetParameterListString(file.dex_files[0].dex_file.dex_proto_ids.proto_id[m.proto_idx].parameters);
+    if(exists(file.dex_files[m.dexIndex].dex_proto_ids.proto_id[m.proto_idx.idx].parameters)) {
+        params = GetParameterListString(file.dex_files[m.dexIndex].dex_proto_ids.proto_id[m.proto_idx.idx].parameters);
     } 
     return retval + " " + classname + "." + methodname + params;
 }
 
 typedef struct (int size) {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     local int s = size;
     method_id_item method_id[size] <comment="Method ID">;
 } method_id_list <read=MethodIDListRead, optimize=true>;
@@ -1084,14 +1214,25 @@ string MethodIDListRead(method_id_list &l) {
 //////////////////////////////////////////////////
 // annotations
 //////////////////////////////////////////////////
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    uint idx <comment = "id">;
+} field_uint_string <read = field_uint_stringRead, optimize = false>;
+
+string field_uint_stringRead(field_uint_string &s) {
+    return FieldIdRead(s.dexIndex, s.idx);
+}
 
 typedef struct {
-    uint field_idx <read=FieldIdRead>;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    field_uint_string field_idx;
     uint annotations_off;
 
     if(annotations_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + annotations_off);
+        FSeek(baseAddr + annotations_off);
     
         struct annotation_set_item field_annotations;
         
@@ -1100,16 +1241,28 @@ typedef struct {
 } field_annotation <read=FieldAnnotationRead, optimize=false>;
 
 string FieldAnnotationRead(field_annotation &f) {
-    return GetFieldById(f.field_idx);
+    return GetFieldById(f.dexIndex, f.field_idx.idx);
 }
 
 typedef struct {
-    uint method_idx <read=MethodIdRead>;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    uint idx <comment = "id">;
+} method_id_string <read = method_id_stringRead, optimize = false>;
+
+string method_id_stringRead(method_id_string &s) {
+    return MethodIdRead(s.dexIndex, s.idx);
+}
+
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    method_id_string method_idx;
     uint annotations_off;
 
     if(annotations_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + annotations_off);
+        FSeek(baseAddr + annotations_off);
     
         struct annotation_set_item method_annotations;
         
@@ -1118,16 +1271,18 @@ typedef struct {
 } method_annotation <read=MethodAnnotationRead, optimize=false>;
 
 string MethodAnnotationRead(method_annotation &m) {
-    return GetMethodById(m.method_idx);
+    return GetMethodById(m.dexIndex, m.method_idx.idx);
 }
 
 typedef struct {
-    uint method_idx <read=MethodIdRead>;
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    method_id_string method_idx;
     uint annotations_off;
 
     if(annotations_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + annotations_off);
+        FSeek(baseAddr + annotations_off);
     
         struct annotation_set_ref_list annotations_list;
         
@@ -1136,7 +1291,7 @@ typedef struct {
 } parameter_annotation <read=ParameterAnnotationRead, optimize=false>;
 
 string ParameterAnnotationRead(parameter_annotation &p) {
-    return GetParameterListString(dex_proto_ids.proto_id[dex_method_ids.method_id[p.method_idx].proto_idx].parameters);
+    return GetParameterListString(dex_proto_ids.proto_id[dex_method_ids.method_id[p.method_idx.idx].proto_idx.idx].parameters);
 }
 
 typedef enum <ubyte> {
@@ -1146,6 +1301,8 @@ typedef enum <ubyte> {
 } VISIBILITY;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     VISIBILITY visibility <comment="Visibility of item">;
     encoded_annotation annotation <comment="Encoded annotation contents">;
 } annotation_item <read=AnnotationItemRead, optimize=false>;
@@ -1155,26 +1312,32 @@ string AnnotationItemRead(annotation_item &i) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint annotation_off <comment="File offset of this annotation entry">;
     
     if(annotation_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + annotation_off);
+        FSeek(baseAddr + annotation_off);
     
         annotation_item item <comment="Annotation item">;
         
         FSeek(pos);
     }
 
-} annotation_off_item <read=AnnotationOffItemRead, optimize=true, size=12>;
+} annotation_off_item <read=AnnotationOffItemRead, optimize=true>;
 
 string AnnotationOffItemRead(annotation_off_item &i) {
     if(exists(i.item)) {
         return AnnotationItemRead(i.item);
+    } else {
+        return "";
     }
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint size <comment="Number of entries in set">;
     
     if(size > 0) {
@@ -1189,11 +1352,13 @@ string AnnotationSetItemRead(annotation_set_item &i) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint class_annotations_off <comment="File offset to class annotations">;
 
     if(class_annotations_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + class_annotations_off);
+        FSeek(baseAddr + class_annotations_off);
     
         annotation_set_item class_annotations <comment="Class annotations">;
         
@@ -1214,7 +1379,7 @@ typedef struct {
     if(parameters_size > 0) {
         parameter_annotation parameter_annotations[parameters_size] <comment="List of method parameter annotations">;    
     }
-} annotations_directory_item <read=AnnotationsDirectoryItemRead, optimize=true, size=16>;
+} annotations_directory_item <read=AnnotationsDirectoryItemRead, optimize=true>;
 
 string AnnotationsDirectoryItemRead(annotations_directory_item &i) {
     local string s; 
@@ -1229,11 +1394,13 @@ string AnnotationsDirectoryItemRead(annotations_directory_item &i) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint annotations_off <comment="File offset of annotation">;
 
     if(annotations_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + annotations_off);
+        FSeek(baseAddr + annotations_off);
     
         struct annotation_set_item item <comment="Annotation set item">;
         
@@ -1242,6 +1409,8 @@ typedef struct {
 } annotation_set_ref_item <optimize=false>;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint size <comment="Number of entries in annotation list">;
     
     if(size > 0) {
@@ -1343,6 +1512,8 @@ string GetFriendlyAccessFlags(ACCESS_FLAGS f, AF_TYPE type) {
 
 // encoded fields
 typedef struct (int previd) {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     local int p = previd;
 
     uleb128 field_idx_diff <comment="Field ID for this field, represented as the difference from the previous index">;
@@ -1351,10 +1522,12 @@ typedef struct (int previd) {
 
 string EncodedFieldRead(encoded_field &f) {
     local int realid = f.p + uleb128_value(f.field_idx_diff);
-    return GetFriendlyAccessFlags(uleb128_value(f.access_flags), AF_FIELD) + GetFieldById(realid);
+    return GetFriendlyAccessFlags(uleb128_value(f.access_flags), AF_FIELD) + GetFieldById(f.dexIndex, realid);
 }
 
 typedef struct (int size) {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     local int s = size;
     local int i;
     local int fieldid = 0;
@@ -1373,6 +1546,8 @@ string EncodedFieldListRead(encoded_field_list &l) {
 
 // encoded methods
 typedef struct (int previd) {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     local int p = previd;
 
     uleb128 method_idx_diff <comment="Method ID for this method, represented as the difference from the previous index">;
@@ -1381,7 +1556,7 @@ typedef struct (int previd) {
 
     if(uleb128_value(code_off) != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + uleb128_value(code_off));
+        FSeek(baseAddr + uleb128_value(code_off));
         struct code_item code <comment="Code structure for this method">;
         FSeek(pos);
     }
@@ -1389,10 +1564,12 @@ typedef struct (int previd) {
 
 string EncodedMethodRead(encoded_method &m) {
     local int realid = m.p + uleb128_value(m.method_idx_diff);
-    return GetFriendlyAccessFlags(uleb128_value(m.access_flags), AF_METHOD) + GetMethodById(realid);
+    return GetFriendlyAccessFlags(uleb128_value(m.access_flags), AF_METHOD) + GetMethodById(m.dexIndex, realid);
 }
 
 typedef struct (int size) {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     local int s = size;
     local int i;
     local int methodid = 0;
@@ -1410,6 +1587,8 @@ string EncodedMethodListRead(encoded_method_list &l) {
 }    
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 static_fields_size <comment="The number of static fields">;
     uleb128 instance_fields_size <comment="The number of instance fields">;
     uleb128 direct_methods_size <comment="The number of direct methods">;
@@ -1441,26 +1620,37 @@ string ClassDataItemRead(class_data_item &i) {
 }   
 
 typedef struct {
-    local int64 pos;
-    uint class_idx <read=LongTypeIdRead, comment="Type ID for this class">;
-    // local string name = GetLongTypeDescriptor(GetTypeById(class_idx));
-    ACCESS_FLAGS access_flags <comment="Access flags">;
-    uint superclass_idx <read=LongTypeIdRead, comment="Type ID for this class's superclass">; 
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    uint idx;
+} long_type_uint_string <read = long_type_uint_stringRead, optimize = false>;
 
+string long_type_uint_stringRead(long_type_uint_string &s) {
+    return LongTypeIdRead(s.dexIndex, s.idx);
+}
+
+typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
+    local int64 pos;
+    long_type_uint_string class_idx <comment="Type ID for this class">;
+    // local string name = GetLongTypeDescriptor(GetTypeById(dexIndex, class_idx));
+    ACCESS_FLAGS access_flags <comment="Access flags">;
+    long_type_uint_string superclass_idx <comment="Type ID for this class's superclass">; 
     uint interfaces_off <comment="File offset to interface list">;
     if(interfaces_off != 0) {
         pos = FTell();
-        FSeek(odexpad + interfaces_off);
+        FSeek(baseAddr + interfaces_off);
         type_item_list interfaces <read=InterfacesRead, comment="Interface data">;
         FSeek(pos);
     }
 
-    uint source_file_idx <read=StringIdRead, comment="String ID for the name of the file with this class defined">;
+    id_string source_file_idx <comment="String ID for the name of the file with this class defined">;
 
     uint annotations_off <comment="File offset to the annotation structure for this class">;
     if(annotations_off != 0) {
         pos = FTell();
-        FSeek(odexpad + annotations_off);
+        FSeek(baseAddr + annotations_off);
         annotations_directory_item annotations <comment="Annotation data">;
         FSeek(pos);
     }
@@ -1468,7 +1658,7 @@ typedef struct {
     uint class_data_off <comment="File offset to the class data for this class">;
     if(class_data_off != 0) {
         pos = FTell();
-        FSeek(odexpad + class_data_off);
+        FSeek(baseAddr + class_data_off);
         class_data_item class_data <comment="Class data">;
         FSeek(pos);
     }
@@ -1476,14 +1666,14 @@ typedef struct {
     uint static_values_off <comment="File offset to static field data">;
     if(static_values_off != 0) {
         pos = FTell();
-        FSeek(odexpad + static_values_off);
+        FSeek(baseAddr + static_values_off);
         struct encoded_array_item static_values <comment="Static values">;
         FSeek(pos);        
     }
 } class_def_item <read=ClassDefItemRead, optimize=false>;
 
 string ClassDefItemRead(class_def_item &i) {
-    local string name = GetLongTypeById(i.class_idx);
+    local string name = GetLongTypeById(i.dexIndex, i.class_idx.idx);
     local string flags = GetFriendlyAccessFlags(i.access_flags, AF_CLASS);
     return flags + name;
 }
@@ -1493,7 +1683,7 @@ string InterfacesRead(type_item_list &l) {
     int i;
 
     for(i = 0; i < l.size; i++) {
-        s += GetLongTypeDescriptor(GetTypeById(l.list[i].type_idx));
+        s += GetLongTypeDescriptor(GetTypeById(l.dexIndex, l.list[i].type_idx));
         if(i+1 < l.size) {
             s += ", ";
         }
@@ -1502,6 +1692,14 @@ string InterfacesRead(type_item_list &l) {
 }
 
 typedef struct (int size) {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     local int s = size;
     class_def_item class_def[size] <comment="Class ID">;
 } class_def_item_list <read=ClassDefItemListRead>;
@@ -1513,12 +1711,16 @@ string ClassDefItemListRead(class_def_item_list &l) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint start_addr <comment="Start address of code block covered by this entry, in 16-bit code units from the start of the first instruction">;
     ushort insn_count <comment="Number of 16-bit code units covered by this entry">;
     ushort handler_off <comment="Offset to the catch_handler_item for this entry">;
-} try_item <optimize=false, size=8>;
+} try_item <optimize=false>;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     sleb128 size <comment="Number of catch types in the list">;
 
     local int s = sleb128_value(size);
@@ -1542,6 +1744,8 @@ string EncodedCatchHandlerRead(encoded_catch_handler &h) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 size <comment="Number of handler lists">;
     encoded_catch_handler list[uleb128_value(size)] <comment="List of handler lists">;
 } encoded_catch_handler_list <read=EncodedCatchHandlerListRead>;
@@ -1553,6 +1757,8 @@ string EncodedCatchHandlerListRead(encoded_catch_handler_list &l) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     ushort registers_size <comment="Number of registers used by this code">;
     ushort ins_size <comment="Number of words of incoming arguments for this code's method">;
     ushort outs_size <comment="Number of words of outgoing arguments for this code's method">;
@@ -1561,7 +1767,7 @@ typedef struct {
 
     if(debug_info_off != 0) {
         local int64 pos = FTell();
-        FSeek(odexpad + debug_info_off);
+        FSeek(baseAddr + debug_info_off);
 
         struct debug_info_item debug_info <comment="Debug information for this method">;
         FSeek(pos);
@@ -1590,17 +1796,21 @@ string CodeItemRead(code_item &i) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 type_idx <read=LongTypeIdReadUleb, comment="Type ID for the type of exception to catch">;
     uleb128 addr <comment="Bytecode address of exception handler">;
 } encoded_type_addr_pair <read=EncodedTypeAddrPairRead, optimize=false>;
 
 string EncodedTypeAddrPairRead(encoded_type_addr_pair &p) {
     string s;
-    SPrintf(s, "%s at 0x%X", GetLongTypeById(uleb128_value(p.type_idx)), uleb128_value(p.addr));
+    SPrintf(s, "%s at 0x%X", GetLongTypeById(p.dexIndex, uleb128_value(p.type_idx)), uleb128_value(p.addr));
     return s;
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     encoded_array value <comment="The encoded array value">;
 } encoded_array_item <read=EncodedArrayItemRead>;
 
@@ -1651,6 +1861,8 @@ typedef enum <ubyte> {
 } DBG_OPCODE;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     DBG_OPCODE opcode <comment="Debug opcode">;
     local string args = "";
 
@@ -1718,6 +1930,8 @@ string DebugOpcodeRead(debug_opcode &opcode) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uleb128 line_start <comment="Initial value for state machine 'line' register">;
     uleb128 parameters_size <comment="Number of encoded parameter names">;
     if(uleb128_value(parameters_size) > 0) {
@@ -1733,11 +1947,13 @@ typedef struct {
 // map list
 //////////////////////////////////////////////////
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     TYPE_CODES type;
     ushort unused;
     uint size;
     uint offset;  
-} map_item <read=MapItemRead, optimize=true, size=12>;
+} map_item <read=MapItemRead, optimize=true>;
 
 string MapItemRead(map_item &m) {
     string s;
@@ -1746,6 +1962,14 @@ string MapItemRead(map_item &m) {
 }
 
 typedef struct {
+    local int i;
+    local quad parentAddr = startof(parentof(this));
+	for (i=0; i<dexCount; i++) {
+		if (parentAddr == dexOffs[i])
+            break;
+	}
+    local quad baseAddr = dexOffs[i];
+    local int dexIndex = i;
     uint size;
     map_item list[size];
 } map_list_type <read=MapListTypeRead>;
@@ -1763,47 +1987,51 @@ string MapListTypeRead(map_list_type &t) {
 //////////////////////////////////////////////////
 
 // read a value from the string table
-string StringIdRead(int id) {
+string StringIdRead(int dexIndex, int id) {
     if(id == NO_INDEX) {
         return "NO_INDEX";
     }
     local string s;
-    SPrintf(s, "(0x%.X) \"%s\"", id, GetStringById(id));
+    SPrintf(s, "(0x%.X) \"%s\"", id, GetStringById(dexIndex, id));
     return s;
 }
 
 string StringIdReadUleb(uleb128 &id) {
-    return StringIdRead(uleb128_value(id));
+    return StringIdRead(parentof(id).dexIndex, uleb128_value(id));
 }
 
 string StringIdReadUlebp1(uleb128p1 &id) {
-    return StringIdRead(uleb128p1_value(id));
+    return StringIdRead(parentof(id).dexIndex, uleb128p1_value(id));
 }
 
 // read a value from the type table, return short form
-string TypeIdRead(int id) {
-    return GetIdAndNameString(id, GetTypeById(id));
+string TypeIdRead(int dexIndex, int id) {
+    local string s;
+    return GetIdAndNameString(id, GetTypeById(dexIndex, id));
 }
 
 // read a value from the type table, return the long form
-string LongTypeIdRead(int id) {
-    return GetIdAndNameString(id, GetLongTypeById(id));
+string LongTypeIdRead(int dexIndex, int id) {
+    local string s;
+    return GetIdAndNameString(id, GetLongTypeById(dexIndex, id));
 }
 
 string LongTypeIdReadUleb(uleb128 &id) {
-    return LongTypeIdRead(uleb128_value(id));
+    return LongTypeIdRead(parentof(id).dexIndex, uleb128_value(id));
 }
 
 string LongTypeIdReadUlebp1(uleb128p1 &id) {
-    return LongTypeIdRead(uleb128p1_value(id));
+    return LongTypeIdRead(parentof(id).dexIndex, uleb128p1_value(id));
 }
 
-string FieldIdRead(int id) {
-    return GetIdAndNameString(id, GetFieldById(id));
+string FieldIdRead(int dexIndex, int id) {
+    local string s;
+    return GetIdAndNameString(id, GetFieldById(dexIndex, id));
 }
 
-string MethodIdRead(int id) {
-    return GetIdAndNameString(id, GetMethodById(id));
+string MethodIdRead(int dexIndex, int id) {
+    local string s;
+    return GetIdAndNameString(id, GetMethodById(dexIndex, id));
 }
 
 string GetIdAndNameString(int id, string name) {
@@ -1813,52 +2041,52 @@ string GetIdAndNameString(int id, string name) {
 }
 
 // read a string from the string table
-string GetStringById(int id) {
+string GetStringById(int dexIndex, int id) {
     if(id == NO_INDEX) {
         return "NO_INDEX";
     }
     
-    if(exists(file.dex_files[0].dex_file.dex_string_ids.string_id[id])) {
-        return file.dex_files[0].dex_file.dex_string_ids.string_id[id].string_data.data;
+    if(exists(file.dex_files[dexIndex].dex_string_ids.string_id[id])) {
+        return file.dex_files[dexIndex].dex_string_ids.string_id[id].string_data.data;
     } else {
         return "***### NO STRING";
     }
 }
 
-string GetTypeById(int id) {
+string GetTypeById(int dexIndex, int id) {
     if(id == NO_INDEX) {
         return "NO_INDEX";
     }
-    if(exists(file.dex_files[0].dex_file.dex_type_ids.type_id[id])) {
-        return GetStringById(file.dex_files[0].dex_file.dex_type_ids.type_id[id].descriptor_idx);
+    if(exists(file.dex_files[dexIndex].dex_type_ids.type_id[id])) {
+        return GetStringById(dexIndex, file.dex_files[dexIndex].dex_type_ids.type_id[id].descriptor_idx.idx);
     } else {
         return "*** NO TYPE";
     }
 }
 
-string GetLongTypeById(int id) {
-    return GetLongTypeDescriptor(GetTypeById(id));
+string GetLongTypeById(int dexIndex, int id) {
+    return GetLongTypeDescriptor(GetTypeById(dexIndex, id));
 }
 
-string GetMethodById(int id) {
+string GetMethodById(int dexIndex, int id) {
     if(id == NO_INDEX) {
         return "NO_INDEX";
     }
 
-    if(exists(file.dex_files[0].dex_file.dex_method_ids.method_id[id])) {
-        return MethodIdItemRead(file.dex_files[0].dex_file.dex_method_ids.method_id[id]);
+    if(exists(file.dex_files[dexIndex].dex_method_ids.method_id[id])) {
+        return MethodIdItemRead(file.dex_files[dexIndex].dex_method_ids.method_id[id]);
     } else {
         return "*** NO METHOD";
     }
 }
 
-string GetFieldById(int id) {
+string GetFieldById(int dexIndex, int id) {
     if(id == NO_INDEX) {
         return "NO_INDEX";
     }
 
-    if(exists(file.dex_files[0].dex_file.dex_field_ids.field_id[id])) {
-        return FieldIdItemRead(file.dex_files[0].dex_file.dex_field_ids.field_id[id]);
+    if(exists(file.dex_files[dexIndex].dex_field_ids.field_id[id])) {
+        return FieldIdItemRead(file.dex_files[dexIndex].dex_field_ids.field_id[id]);
     } else {
         return "*** NO FIELD";
     }
@@ -1875,6 +2103,8 @@ typedef enum<uint> {
 } DEX_CHUNK_TYPE;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     DEX_CHUNK_TYPE type <comment="Chunk type">;
     uint size <comment="Size of chunk, in bytes">;
     local int realsize = (size + 7) & ~7;
@@ -1894,6 +2124,8 @@ typedef struct {
 } dexopt_opt_chunk <read=DexOptChunkRead, optimize=false>;
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     local int count = 0;
     do {
         dexopt_opt_chunk chunk;
@@ -1914,6 +2146,8 @@ string DexOptChunkRead(dexopt_opt_chunk &c) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     int offset;
 } class_descriptor <read=readClassDescriptor, optimize=false>;
 
@@ -1924,10 +2158,12 @@ string readClassDescriptor(class_descriptor &item) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     uint class_descriptor_hash <comment="Class descriptor hash code">; 
     class_descriptor class_descriptor_item <comment="Class descriptor item">;
     int class_definition_offset <comment="File offset of class definition">; 
-} dex_class_lookup_entry <read=DexClassLookupEntryRead, optimize=false, size=12>;
+} dex_class_lookup_entry <read=DexClassLookupEntryRead, optimize=false>;
 
 string DexClassLookupEntryRead(dex_class_lookup_entry &e) {
     local string s;
@@ -1936,6 +2172,8 @@ string DexClassLookupEntryRead(dex_class_lookup_entry &e) {
 }
 
 typedef struct {
+    local quad baseAddr = parentof(this).baseAddr;
+    local int dexIndex = parentof(this).dexIndex;
     int size <comment="Size of dex_class_lookup structure">;
     int num_entries <comment="Number of entries in class lookup hashtable">;
 
@@ -1954,63 +2192,12 @@ typedef struct {
 //////////////////////////////////////////////////
 // dex file
 //////////////////////////////////////////////////
-
-typedef struct {
-
-
-    // main dex header and structs
-
-    SetBackColor(cLtGreen);
-    header_item header <comment="Dex file header">;
-
-    FSeek(header.string_ids_off + odexpad);
-    SetBackColor(cLtYellow);
-    string_id_list dex_string_ids(header.string_ids_size) <comment="String ID list">;
-
-    FSeek(header.type_ids_off + odexpad);
-    SetBackColor(cLtPurple);
-    type_id_list dex_type_ids(header.type_ids_size) <comment="Type ID list">;
-
-    FSeek(header.proto_ids_off + odexpad);
-    SetBackColor(cLtBlue);
-    proto_id_list dex_proto_ids(header.proto_ids_size) <comment="Method prototype ID list">;
-
-    FSeek(header.field_ids_off + odexpad);
-    SetBackColor(cYellow);
-    field_id_list dex_field_ids(header.field_ids_size) <comment="Field ID list">;
-
-    FSeek(header.method_ids_off + odexpad);
-    SetBackColor(cDkYellow);
-    method_id_list dex_method_ids(header.method_ids_size) <comment="Method ID list">;
-
-    FSeek(header.class_defs_off + odexpad);
-    SetBackColor(cLtGray);
-    class_def_item_list dex_class_defs(header.class_defs_size) <comment="Class definitions list">;
-
-    // map list, we don't really do anything with it though
-    SetBackColor(cLtAqua);
-    if(header.map_off != 0) {
-        FSeek(odexpad + header.map_off);
-        map_list_type dex_map_list <comment="Map list">;
-    }
-
-    // It's not really useful to see just the last warning, so inform us how many warnings we should see in output
-    if(warnings > 1) {
-        Warning("%d warnings have occured and logged to the output box!", warnings);
-    }
-
-    // This will make the template show "Template executed successfully."
-    if(warnings != 0) {
-        SPrintf(temp_warning, "%d warnings found, template may not have run successfully!", warnings);
-        return temp_warning;
-    }
-} DexFile;
-
 typedef struct{
-    
     if (global_version[0] == '0' &&  global_version[1] == '3') {
         uint32 code_offset_;
         uint32 gc_map_offset_;
+    } else if (global_version[0] == '0' && global_version[1] == '6') {
+        uint32 code_offset_;
     } else {
         uint32 code_offset_;
 	    uint32 frame_size_in_bytes_;
@@ -2041,12 +2228,13 @@ typedef struct{
 } OatMethodOffsets;
 
 typedef struct (int index) {
+    local int dexIndex = parentof(this).dexIndex;
     local int t_index = index;
-    if (global_version[0] == '0' &&  global_version[1] == '3') {
+    if (global_version[0] == '0' &&  (global_version[1] == '3' || global_version[1] == '6')) {
         uint16 status;
         uint16 type;
         if (type == 0) {
-            local int methodCount = getClassMethodCount(parentof(parentof(this)).dex_file, index);
+            local int methodCount = getClassMethodCount(dexIndex, index);
             if (methodCount > 0) {
 	            OatMethodOffsets methodOffset[methodCount] <optimize=false>;
             }
@@ -2076,7 +2264,7 @@ typedef struct (int index) {
         }
     } else {
         uint32 status;
-	    local int methodCount = getClassMethodCount(parentof(parentof(this)).dex_file, index);
+	    local int methodCount = getClassMethodCount(dexIndex, index);
 	    
         if (methodCount > 0) {
 	        OatMethodOffsets methodOffset[methodCount] <optimize=false>;
@@ -2091,11 +2279,12 @@ typedef struct (int index) {
 } OatClass <read=ReadOatClass, optimize=false>;
 
 string ReadOatClass(OatClass &c) {
-    local string name = getClassName(file.dex_files[0].dex_file, c.t_index);
+    local string name = getClassName(c.dexIndex, c.t_index);
 	return name;
 }
 
-typedef struct (int size) {
+typedef struct (int index, int size) {
+    local int dexIndex = index;
 	local int total = size;
 	local int idx;
 	for (idx=0; idx<size; idx++) {
@@ -2103,24 +2292,87 @@ typedef struct (int size) {
 	}
 } OatClasses <read=ReadOatClasses>;
 
+typedef struct {
+
+
+    // main dex header and structs
+    local quad addr = FTell();
+    // local int dexIndex = dexCount;
+    // dexCount += 1;
+    SetBackColor(cLtGreen);
+    header_item header <comment="Dex file header">;
+
+    FSeek(header.string_ids_off + addr);
+    SetBackColor(cLtYellow);
+    string_id_list dex_string_ids(header.string_ids_size) <comment="String ID list">;
+
+    FSeek(header.type_ids_off + addr);
+    SetBackColor(cLtPurple);
+    type_id_list dex_type_ids(header.type_ids_size) <comment="Type ID list">;
+
+    FSeek(header.proto_ids_off + addr);
+    SetBackColor(cLtBlue);
+    proto_id_list dex_proto_ids(header.proto_ids_size) <comment="Method prototype ID list">;
+
+    FSeek(header.field_ids_off + addr);
+    SetBackColor(cYellow);
+    field_id_list dex_field_ids(header.field_ids_size) <comment="Field ID list">;
+
+    FSeek(header.method_ids_off + addr);
+    SetBackColor(cDkYellow);
+    method_id_list dex_method_ids(header.method_ids_size) <comment="Method ID list">;
+
+    FSeek(header.class_defs_off + addr);
+    SetBackColor(cLtGray);
+    class_def_item_list dex_class_defs(header.class_defs_size) <comment="Class definitions list">;
+
+    // map list, we don't really do anything with it though
+    SetBackColor(cLtAqua);
+    if(header.map_off != 0) {
+        FSeek(addr + header.map_off);
+        map_list_type dex_map_list <comment="Map list">;
+    }
+
+    // It's not really useful to see just the last warning, so inform us how many warnings we should see in output
+    if(warnings > 1) {
+        Warning("%d warnings have occured and logged to the output box!", warnings);
+    }
+
+    // This will make the template show "Template executed successfully."
+    if(warnings != 0) {
+        SPrintf(temp_warning, "%d warnings found, template may not have run successfully!", warnings);
+        return temp_warning;
+    }
+    FSeek(oatClassOffs);
+    OatClasses oat_classes(header.dexIndex, header.class_defs_size);
+    oatClassOffs = FTell();
+    FSeek(addr + header.file_size);
+} DexFile <optimize=false, size=readDexFileSize>;
+
+int readDexFileSize(DexFile &item) {
+    return ReadUInt(startof(item)+32);
+}
+
+
+
 string ReadOatClasses(OatClasses &oc) {
 	local string s;
 	SPrintf(s, "%i classes", oc.total);
 	return s;
 }
 
-string getClassName(struct DexFile& dexfile, int classIdx) {
-	if (exists(dexfile.dex_class_defs.class_def[classIdx])) {
-		return GetLongTypeById(dexfile.dex_class_defs.class_def[classIdx].class_idx);
+string getClassName(int dexIndex, int classIdx) {
+	if (exists(file.dex_files[dexIndex].dex_class_defs.class_def[classIdx])) {
+		return GetLongTypeById(dexIndex, file.dex_files[dexIndex].dex_class_defs.class_def[classIdx].class_idx.idx);
 	}
 	return "** NO NAME **";
 }
 
-int getClassMethodCount(struct DexFile& dexfile, int classIdx) {
-	if (exists(dexfile.dex_class_defs.class_def[classIdx])) {
-		if (exists(dexfile.dex_class_defs.class_def[classIdx].class_data)) {
-			local int dirNum = uleb128_value(dexfile.dex_class_defs.class_def[classIdx].class_data.direct_methods_size);
-			local int virNum = uleb128_value(dexfile.dex_class_defs.class_def[classIdx].class_data.virtual_methods_size);
+int getClassMethodCount(int index, int classIdx) {
+	if (exists(file.dex_files[dexIndex].dex_class_defs.class_def[classIdx])) {
+		if (exists(file.dex_files[dexIndex].dex_class_defs.class_def[classIdx].class_data)) {
+			local int dirNum = uleb128_value(file.dex_files[dexIndex].dex_class_defs.class_def[classIdx].class_data.direct_methods_size);
+			local int virNum = uleb128_value(file.dex_files[dexIndex].dex_class_defs.class_def[classIdx].class_data.virtual_methods_size);
 			return dirNum + virNum;
 		}
 	}
@@ -2132,71 +2384,98 @@ typedef struct {
 	char   dex_file_location_data[dex_file_location_size];
 	uint32 dex_file_checksum;
 	uint32 dex_file_offset;
+    dexOffs[dexCount] = dex_file_offset + oatdata_off;
+    
+    // local quad off = FTell();
+	// FSeek(oatdata_off + dex_file_offset);
+    // // Printf("start dexfile\n");
+	// DexFile dex_file;
+	// // Printf("end dexfile\n");
+    // FSeek(off);
 	
-	local quad off = FTell();
-	local quad method_count = (oatdata_off + dex_file_offset - off) / sizeof(uint32);
-	uint32 class_offs[method_count];
-
-	odexpad = oatdata_off + dex_file_offset;
-	FSeek(oatdata_off + dex_file_offset);
-    // Printf("start dexfile\n");
-	DexFile dex_file;
-	// Printf("end dexfile\n");
-	FSeek(oatdata_off + dex_file_offset + dex_file.header.file_size);
-	OatClasses oat_classes(dex_file.header.class_defs_size) ;
+	// //local quad method_count = (oatdata_off + dex_file_offset - off) / sizeof(uint32);
+	// uint32 class_offs[dex_file.class_defs_size];
+		
+	// FSeek(oatdata_off + dex_file_offset + dex_file.file_size);
+	// OatClasses oat_classes(dex_file.class_defs_size) ;
+    // FSeek(off + dex_file.class_defs_size*4);
+    local uint32 classDefsSize = getClassDefsSize(dex_file_offset);
+    defsSize[dexCount] = classDefsSize;
+    dexCount += 1;
+	uint32 class_offs[classDefsSize];
 	
 } OatDexFile <optimize=false>;
+
+uint32 getClassDefsSize(uint32 addr) {
+    // Printf("SectionVAddrOffset=%x\n", oatdata_off + addr + 0x60);
+    return ReadUInt(oatdata_off + addr + 0x60);
+}
 
 typedef struct {
 	char	  magic[4];
 	char	  version[4];
 	uint32	checksum;
 	InstructionSet instruction_set;
-    if (version[0] == '0' &&  version[1] == '3') {
+    if (version[0] == '0' &&  (version[1] == '3' || version[1] == '6')) {
         uint32 instruction_set_features_;
     }
-
+    global_version[0] = version[0];
+    global_version[1] = version[1];
+    global_version[2] = version[2];
+    global_version[3] = version[3];
 	uint32 dex_file_count;
 	uint32 executable_offset_;
 	uint32 interpreter_to_interpreter_bridge_offset_;
 	uint32 interpreter_to_compiled_code_bridge_offset_;
 	uint32 jni_dlsym_lookup_offset_;
 
-    // oat 031 begin
-    if (version[0] == '0' &&  version[1] == '3') {
-        uint32 portable_imt_conflict_trampoline_offset_;
-    }
-    // oat 031 end
-
-	uint32 portable_resolution_trampoline_offset_;
-	uint32 portable_to_interpreter_bridge_offset_;
-
-    // oat 031 begin
-    if (version[0] == '0' &&  version[1] == '3') {
+    if (version[0] == '0' &&  version[1] == '6') {
         uint32 quick_generic_jni_trampoline_offset_;
         uint32 quick_imt_conflict_trampoline_offset_;
+        uint32 quick_resolution_trampoline_offset_;
+        uint32 quick_to_interpreter_bridge_offset_;
+        int32 image_patch_delta_;
+        uint32 image_file_location_oat_checksum_;
+        uint32 image_file_location_oat_data_begin_;
+        uint32 key_value_store_size_;
+        char   key_value_store_[key_value_store_size_];
+        //uint32 key_value_store_;
+        //uchar key_value_store_[0]; 
+    } else {
+        // oat 031 begin
+        if (version[0] == '0' &&  version[1] == '3') {
+            uint32 portable_imt_conflict_trampoline_offset_;
+        }
+        // oat 031 end
+    
+	    uint32 portable_resolution_trampoline_offset_;
+	    uint32 portable_to_interpreter_bridge_offset_;
+    
+        // oat 031 begin
+        if (version[0] == '0' &&  version[1] == '3') {
+            uint32 quick_generic_jni_trampoline_offset_;
+            uint32 quick_imt_conflict_trampoline_offset_;
+        }
+        // oat 031 end
+    
+	    uint32 quick_resolution_trampoline_offset_;
+	    uint32 quick_to_interpreter_bridge_offset_;
+    
+        // oat 039 begin
+        if (version[0] == '0' &&  version[1] == '3' &&  version[2] == '9') {
+            uint32 image_patch_delta_;
+        }
+        // uint32 unknow_3;
+        // uint32 unknow_4;
+        // uint32 unknow_5;
+        // oat 039 end
+        
+	    uint32 image_file_location_oat_checksum_;
+	    uint32 image_file_location_oat_data_begin_;
+	    uint32 image_file_location_size;
+	    char   image_file_location_data[image_file_location_size];
     }
-    // oat 031 end
-
-	uint32 quick_resolution_trampoline_offset_;
-	uint32 quick_to_interpreter_bridge_offset_;
-
-    // oat 039 begin
-    if (version[0] == '0' &&  version[1] == '3' &&  version[2] == '9') {
-        uint32 image_patch_delta_;
-    }
-    // uint32 unknow_3;
-    // uint32 unknow_4;
-    // uint32 unknow_5;
-    // oat 039 end
-    global_version[0] = version[0];
-    global_version[1] = version[1];
-    global_version[2] = version[2];
-    global_version[3] = version[3];
-	uint32 image_file_location_oat_checksum_;
-	uint32 image_file_location_oat_data_begin_;
-	uint32 image_file_location_size;
-	char   image_file_location_data[image_file_location_size];
+    
 } OatHeader;
 
 struct {
@@ -2274,6 +2553,13 @@ struct {
 		FSeek(oatdata_off);
     }
     OatHeader oat_header;
-    OatDexFile dex_files[oat_header.dex_file_count];
-	
+    OatDexFile oat_dex_files[oat_header.dex_file_count];
+    FSeek( oat_dex_files[0].dex_file_offset + oatdata_off );
+	DexFile dex_files[dexCount];
+    oatClassOffs = FTell();
+    //local int i;
+    //for(i=0;i<dexCount;i++) {
+    //    OatClasses oat_classes(i, defsSize[i]);
+    //}
+    
 } file;
