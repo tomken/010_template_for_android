@@ -50,7 +50,8 @@ enum {
     // Chunk types in RES_TABLE_TYPE
     RES_TABLE_PACKAGE_TYPE      = 0x0200,
     RES_TABLE_TYPE_TYPE         = 0x0201,
-    RES_TABLE_TYPE_SPEC_TYPE    = 0x0202
+    RES_TABLE_TYPE_SPEC_TYPE    = 0x0202,
+    RES_TABLE_LIBRARY_TYPE      = 0x0203
 };
 
 /* attributes' types */
@@ -250,6 +251,9 @@ typedef struct {
     uint version;
     uint screenConfig;
     uint screenSizeDp;
+    uchar localeScript[4];
+    uchar localeVariant[8];
+    uint screenConfig2;
 } arsc_config;
 
 typedef struct {
@@ -260,7 +264,9 @@ typedef struct {
     uint entryCount;
     uint entriesStart;
     
+    local uint cfgBegin = FTell();
     arsc_config config;
+    FSeek(cfgBegin + config.size);
     
     local ushort size;
     local int i;
@@ -293,9 +299,15 @@ typedef struct {
     uint lastPublicType;
     uint keyStringsOffset;
     uint lastPublicKey;
+    uint typeIdOffset;
 
+    FSeek(begin + typeStringsOffset);
     arsc_strings typeStrings;
+
+    FSeek(begin + keyStringsOffset);
     arsc_strings keyStrings;
+
+    FSeek(begin + header.head_size);
 
     local ushort htype;
     local ushort hsize;
@@ -308,12 +320,17 @@ typedef struct {
         hsize = ReadUShort(cur+2);
         size = ReadUInt(cur+4);
 
-        // Printf("cur=%x hsize=%d size=%d end=%d\n", cur, hsize, size, end);
-        if (htype == RES_TABLE_TYPE_SPEC_TYPE) {
+        // Printf("cur=%x hsize=%x size=%x end=%x\n", cur, hsize, size, end);
+        if (htype == RES_STRING_POOL_TYPE) {
+        } else if (htype == RES_TABLE_TYPE_SPEC_TYPE) {
             arsc_typespec typeSpec <read=AresTypeSpecRead>;
         } else if (htype == RES_TABLE_TYPE_TYPE) {
             arsc_typetype typeType;
+        } else if (htype == RES_TABLE_LIBRARY_TYPE) {
+            Printf("unsupported type RES_TABLE_LIBRARY_TYPE\n");
         } else {
+            Printf("unknow type %x\n", htype);
+            break;
         }
 
         cur += size;
