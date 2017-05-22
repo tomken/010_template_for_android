@@ -57,28 +57,28 @@ enum {
 /* attributes' types */
 typedef enum<uint> {
 
-	ATTR_NULL 	= 0,
-	ATTR_REFERENCE 	= 1,
-	ATTR_ATTRIBUTE 	= 2,
-	ATTR_STRING 	= 3,
-	ATTR_FLOAT 	= 4,
-	ATTR_DIMENSION 	= 5,
-	ATTR_FRACTION 	= 6,
-	
-	ATTR_FIRSTINT 	= 16,
+    ATTR_NULL   = 0,
+    ATTR_REFERENCE  = 1,
+    ATTR_ATTRIBUTE  = 2,
+    ATTR_STRING     = 3,
+    ATTR_FLOAT  = 4,
+    ATTR_DIMENSION  = 5,
+    ATTR_FRACTION   = 6,
+    
+    ATTR_FIRSTINT   = 16,
 
-	ATTR_DEC 	= 16,
-	ATTR_HEX	= 17,
-	ATTR_BOOLEAN	= 18,
+    ATTR_DEC    = 16,
+    ATTR_HEX    = 17,
+    ATTR_BOOLEAN    = 18,
 
-	ATTR_FIRSTCOLOR	= 28,
-	ATTR_ARGB8 	= 28,
-	ATTR_RGB8	= 29,
-	ATTR_ARGB4	= 30,
-	ATTR_RGB4	= 31,
-	ATTR_LASTCOLOR	= 31,
+    ATTR_FIRSTCOLOR = 28,
+    ATTR_ARGB8  = 28,
+    ATTR_RGB8   = 29,
+    ATTR_ARGB4  = 30,
+    ATTR_RGB4   = 31,
+    ATTR_LASTCOLOR  = 31,
 
-	ATTR_LASTINT	= 31,
+    ATTR_LASTINT    = 31,
 } arsc_attr_type;
 
 typedef struct {
@@ -225,9 +225,17 @@ typedef struct {
 } arsc_entry;
 
 typedef struct {
+    uint name;
+    arsc_value value;
+} arsc_map;
+
+typedef struct {
     arsc_entry entry;
     uint parentRef;
     uint count;
+    if (count > 0) {
+        arsc_map data[count];
+    }
 } arsc_mapentry;
 
 typedef struct {
@@ -269,20 +277,26 @@ typedef struct {
     FSeek(cfgBegin + config.size);
     
     local ushort size;
+    local ushort flag;
     local int i;
     local uint entryOff;
     if (entryCount > 0) {
         uint entryOffsets[entryCount];
 
+        local uint entryBegin = FTell();
+
         for(i=0; i<entryCount; i++) {
             entryOff = entryOffsets[i];
             if (entryOff != 0xFFFFFFFF) {
-                size = ReadUInt(FTell());
-                if (size == sizeof(arsc_entry)) {
+                FSeek(entryBegin + entryOff);
+                size = ReadUShort(FTell());
+                flag = ReadUShort(FTell()+2);
+                if (flag & 0x0001) {
+                    arsc_mapentry mapEntry;
+                
+                } else {
                     arsc_entry entry;
                     arsc_value value;
-                } else {
-                    arsc_mapentry mapEntry;
                 }
             }
         }
